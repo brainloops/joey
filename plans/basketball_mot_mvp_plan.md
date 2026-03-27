@@ -35,6 +35,12 @@ todos:
   - id: basketball-internal-validation
     content: Build internal basketball validation set from annotated game actions and track-quality scorecards.
     status: pending
+  - id: mot-labeling-tool
+    content: Build a MOT-format labeling tool that exports seqinfo.ini and gt/gt.txt for direct TrackEval use.
+    status: pending
+  - id: detector-prelabel-pipeline
+    content: Build reproducible RF-DETR pre-label extraction pipeline that outputs frame images and det/det.txt for fast human track stitching.
+    status: pending
   - id: reuse-sam3-analytics
     content: Reuse existing SAM3 tracking log schema, JSONL-to-Parquet materialization, and query scripts for diagnostics.
     status: pending
@@ -164,82 +170,16 @@ flowchart LR
   - We can run end-to-end evaluation on at least one split each from DanceTrack and SportsMOT.
   - We can compare our tracker against baseline OC-SORT/ByteTrack style settings using the same evaluation protocol.
 
-### MOTChallenge Format Reference (for custom basketball GT)
+### Labeling Strategy (summary only)
 
-- Why this matters:
-  - If our internal basketball labels follow MOTChallenge conventions, we can evaluate with `TrackEval` and directly compute HOTA/IDF1/MOTA/IDs without custom metric code.
-
-#### 1) `gt.txt` (ground-truth annotations per sequence)
-
-- Common MOT17/MOT20-style GT rows are 9 columns:
-
-| Column | Name | Type | Meaning |
-|---|---|---|---|
-| 1 | `frame` | int | 1-based frame index |
-| 2 | `id` | int | track/player ID (persistent per identity) |
-| 3 | `bb_left` | float | bbox x (top-left) |
-| 4 | `bb_top` | float | bbox y (top-left) |
-| 5 | `bb_width` | float | bbox width |
-| 6 | `bb_height` | float | bbox height |
-| 7 | `conf` | int/float | GT include flag (`0` ignored, non-zero active) |
-| 8 | `class` | int | class label (`1` for person in MOT pedestrian setup) |
-| 9 | `visibility` | float | visibility ratio (typically `0..1`) |
-
-- Example:
-  - `15,23,812.4,266.1,52.0,144.3,1,1,0.82`
-
-#### 2) Tracker result `.txt` (prediction rows for evaluation/submission)
-
-- Official MOTChallenge submission format uses 10 columns:
-
-| Column | Name | Type | Meaning |
-|---|---|---|---|
-| 1 | `frame` | int | 1-based frame index |
-| 2 | `id` | int | predicted track ID |
-| 3 | `bb_left` | float | bbox x (top-left) |
-| 4 | `bb_top` | float | bbox y (top-left) |
-| 5 | `bb_width` | float | bbox width |
-| 6 | `bb_height` | float | bbox height |
-| 7 | `conf` | float | tracker confidence (or placeholder) |
-| 8 | `x` | float | world x (`-1` for 2D challenge) |
-| 9 | `y` | float | world y (`-1` for 2D challenge) |
-| 10 | `z` | float | world z (`-1` for 2D challenge) |
-
-- Example:
-  - `15,23,812.4,266.1,52.0,144.3,0.91,-1,-1,-1`
-
-#### 3) `seqinfo.ini` (per-sequence metadata)
-
-- Each sequence folder should include a `seqinfo.ini` that describes frame count and image geometry.
-- Minimal template:
-
-```ini
-[Sequence]
-name=game_001_clip_0007
-imDir=img1
-frameRate=30
-seqLength=600
-imWidth=1920
-imHeight=1080
-imExt=.jpg
-```
-
-- Notes:
-  - `seqLength` is critical because evaluators use it to account for false positives in frames with no GT objects.
-  - Keep frame naming and count consistent with `img1` and `gt.txt`.
-
-#### 4) Recommended custom basketball sequence layout
-
-```text
-<sequence_name>/
-  img1/
-    000001.jpg
-    000002.jpg
-    ...
-  gt/
-    gt.txt
-  seqinfo.ini
-```
+- Labeling is a major pillar of this project and now has a dedicated plan:
+  - `labeling/labeling-plan.md`
+- Project-level intent:
+  - produce high-quality custom basketball GT in MOT-compatible format
+  - keep labeling fast through detector-assisted pre-labels + click-through stitching workflow
+  - ensure direct interoperability with benchmark-style evaluation (`TrackEval`) without custom converters
+- Cross-plan dependency:
+  - internal validation and benchmark comparison phases depend on outputs defined in `labeling/labeling-plan.md` (`img1`, `det`, `gt`, `seqinfo.ini`)
 
 ## Internal Basketball Validation Protocol
 
