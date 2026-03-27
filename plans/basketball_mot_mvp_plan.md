@@ -137,9 +137,23 @@ flowchart LR
   - Cross-benchmark runs are used as a sanity check and comparison exercise.
 - Candidate benchmark sets to include:
   - DanceTrack (strong test for association under similar-looking targets and frequent occlusion)
-  - SportsMOT (sports-focused multi-player tracking)
-  - MOT17 / MOT20 (standard pedestrian MOT references)
-  - SoccerNet-tracking (sports tracking context outside basketball)
+  - TeamTrack (high-resolution team-sport videos; includes basketball)
+  - SportsMOT (sports-focused multi-player tracking with MOT-style annotations)
+  - MOT17 / MOT20 (standard pedestrian MOT references for external sanity checks)
+- Benchmark sources and download entry points:
+  - DanceTrack:
+    - Project: [https://dancetrack.github.io/](https://dancetrack.github.io/)
+    - Repo: [https://github.com/DanceTrack/DanceTrack](https://github.com/DanceTrack/DanceTrack)
+    - Public mirror (Hugging Face): [https://huggingface.co/datasets/noahcao/dancetrack](https://huggingface.co/datasets/noahcao/dancetrack)
+  - TeamTrack:
+    - Project: [https://atomscott.github.io/TeamTrack/](https://atomscott.github.io/TeamTrack/)
+    - Repo: [https://github.com/AtomScott/TeamTrack](https://github.com/AtomScott/TeamTrack)
+    - Kaggle: [https://www.kaggle.com/datasets/atomscott/teamtrack](https://www.kaggle.com/datasets/atomscott/teamtrack)
+  - SportsMOT:
+    - Repo: [https://github.com/MCG-NJU/SportsMOT](https://github.com/MCG-NJU/SportsMOT)
+    - Dataset mirror: [https://huggingface.co/datasets/MCG-NJU/SportsMOT](https://huggingface.co/datasets/MCG-NJU/SportsMOT)
+  - MOT17/MOT20:
+    - Official benchmark portal and downloads: [https://motchallenge.net/](https://motchallenge.net/)
 - Benchmark execution plan:
   1. Implement dataset loaders/adapters to convert benchmark annotations and detections into our tracker input format.
   2. Add export writer for MOTChallenge-style result files.
@@ -149,6 +163,83 @@ flowchart LR
 - Success criteria for this section:
   - We can run end-to-end evaluation on at least one split each from DanceTrack and SportsMOT.
   - We can compare our tracker against baseline OC-SORT/ByteTrack style settings using the same evaluation protocol.
+
+### MOTChallenge Format Reference (for custom basketball GT)
+
+- Why this matters:
+  - If our internal basketball labels follow MOTChallenge conventions, we can evaluate with `TrackEval` and directly compute HOTA/IDF1/MOTA/IDs without custom metric code.
+
+#### 1) `gt.txt` (ground-truth annotations per sequence)
+
+- Common MOT17/MOT20-style GT rows are 9 columns:
+
+| Column | Name | Type | Meaning |
+|---|---|---|---|
+| 1 | `frame` | int | 1-based frame index |
+| 2 | `id` | int | track/player ID (persistent per identity) |
+| 3 | `bb_left` | float | bbox x (top-left) |
+| 4 | `bb_top` | float | bbox y (top-left) |
+| 5 | `bb_width` | float | bbox width |
+| 6 | `bb_height` | float | bbox height |
+| 7 | `conf` | int/float | GT include flag (`0` ignored, non-zero active) |
+| 8 | `class` | int | class label (`1` for person in MOT pedestrian setup) |
+| 9 | `visibility` | float | visibility ratio (typically `0..1`) |
+
+- Example:
+  - `15,23,812.4,266.1,52.0,144.3,1,1,0.82`
+
+#### 2) Tracker result `.txt` (prediction rows for evaluation/submission)
+
+- Official MOTChallenge submission format uses 10 columns:
+
+| Column | Name | Type | Meaning |
+|---|---|---|---|
+| 1 | `frame` | int | 1-based frame index |
+| 2 | `id` | int | predicted track ID |
+| 3 | `bb_left` | float | bbox x (top-left) |
+| 4 | `bb_top` | float | bbox y (top-left) |
+| 5 | `bb_width` | float | bbox width |
+| 6 | `bb_height` | float | bbox height |
+| 7 | `conf` | float | tracker confidence (or placeholder) |
+| 8 | `x` | float | world x (`-1` for 2D challenge) |
+| 9 | `y` | float | world y (`-1` for 2D challenge) |
+| 10 | `z` | float | world z (`-1` for 2D challenge) |
+
+- Example:
+  - `15,23,812.4,266.1,52.0,144.3,0.91,-1,-1,-1`
+
+#### 3) `seqinfo.ini` (per-sequence metadata)
+
+- Each sequence folder should include a `seqinfo.ini` that describes frame count and image geometry.
+- Minimal template:
+
+```ini
+[Sequence]
+name=game_001_clip_0007
+imDir=img1
+frameRate=30
+seqLength=600
+imWidth=1920
+imHeight=1080
+imExt=.jpg
+```
+
+- Notes:
+  - `seqLength` is critical because evaluators use it to account for false positives in frames with no GT objects.
+  - Keep frame naming and count consistent with `img1` and `gt.txt`.
+
+#### 4) Recommended custom basketball sequence layout
+
+```text
+<sequence_name>/
+  img1/
+    000001.jpg
+    000002.jpg
+    ...
+  gt/
+    gt.txt
+  seqinfo.ini
+```
 
 ## Internal Basketball Validation Protocol
 
