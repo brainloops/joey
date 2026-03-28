@@ -7,7 +7,7 @@ import csv
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 
 def _root_dir() -> Path:
@@ -16,6 +16,22 @@ def _root_dir() -> Path:
 
 def _benchmarks_dir() -> Path:
     return Path(__file__).resolve().parent
+
+
+def _default_trackeval_gt_root() -> Path:
+    return _benchmarks_dir() / "trackeval_data" / "gt" / "mot_challenge"
+
+
+def _default_trackers_root() -> Path:
+    return _benchmarks_dir() / "trackeval_data" / "trackers" / "mot_challenge"
+
+
+def _resolve_dataset_identifier(dataset: str) -> Path:
+    # Accept a short dataset key for zero-config usage.
+    key = dataset.strip().lower()
+    if key in {"dancetrack", "dance-track", "dt"}:
+        return (_benchmarks_dir() / "datasets" / "DanceTrack").resolve()
+    return Path(dataset).expanduser().resolve()
 
 
 def _run(cmd: List[str]) -> None:
@@ -159,6 +175,74 @@ def _validate_trackeval_inputs(gt_root: Path, trackers_root: Path, split: str, t
         raise RuntimeError("Populate all required <seq>.txt files and rerun.")
 
 
+def _resolve_dancetrack_root_and_split(dataset_path: str, split_override: Optional[str]) -> Tuple[Path, str]:
+    path = _resolve_dataset_identifier(dataset_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset path does not exist: {path}")
+
+    split_names = ("train", "val", "test")
+    inferred_split: Optional[str] = None
+
+    if path.name in split_names and path.is_dir():
+        dataset_root = path.parent
+        inferred_split = path.name
+    else:
+        dataset_root = path
+
+    split = split_override or inferred_split
+    if split is None:
+        for candidate in ("val", "train", "test"):
+            if (dataset_root / candidate).is_dir():
+                split = candidate
+                break
+
+    if split is None:
+        raise RuntimeError(
+            f"Could not infer split from dataset path: {path}\n"
+            "Expected either a split folder (.../train, .../val, .../test) "
+            "or a root containing one of those folders."
+        )
+
+    split_dir = dataset_root / split
+    if not split_dir.is_dir():
+        raise FileNotFoundError(f"Inferred split folder not found: {split_dir}")
+    return dataset_root, split
+
+
+def _infer_detection_source(dataset_root: Path, split: str, seqs: List[str]) -> str:
+    det_missing: List[Path] = []
+    gt_missing: List[Path] = []
+    for seq in seqs:
+        seq_root = dataset_root / split / seq
+        det_file = seq_root / "det" / "det.txt"
+        gt_file = seq_root / "gt" / "gt.txt"
+        if not det_file.is_file():
+            det_missing.append(det_file)
+        if not gt_file.is_file():
+            gt_missing.append(gt_file)
+
+    if not det_missing:
+        return "det"
+    if not gt_missing:
+        if len(det_missing) != len(seqs):
+            raise RuntimeError(
+                "Found partial detector outputs: some sequences have det/det.txt and some do not.\n"
+                "Standardize detector outputs across the split (or remove partial files) and rerun."
+            )
+        return "gt"
+
+    preview = "\n".join(f"  - {p}" for p in det_missing[:3])
+    raise RuntimeError(
+        "Could not infer detection source because required MOT files are missing.\n"
+        f"Missing det files (sample):\n{preview}\n"
+        "Expected either all det/det.txt files (det mode) or all gt/gt.txt files (gt mode)."
+    )
+
+
+def _default_tracker_output_name(tracker: str, detection_source: str) -> str:
+    return f"{tracker}_{detection_source}"
+
+
 def cmd_detect(args: argparse.Namespace) -> None:
     script = _benchmarks_dir() / "generate_dancetrack_detections_rfdetr.py"
     cmd = [
@@ -203,6 +287,8 @@ def cmd_track(args: argparse.Namespace) -> None:
         args.bytetrack_name,
         "--ocsort-name",
         args.ocsort_name,
+        "--mcbyte-name",
+        args.mcbyte_name,
         "--min-det-score",
         str(args.min_det_score),
     ]
@@ -327,6 +413,60 @@ def cmd_run(args: argparse.Namespace) -> None:
             split=args.split,
             tracker_name=args.ocsort_name,
         )
+    if args.tracker in ("mcbyte", "all"):
+        _run_eval_for_tracker(
+            python_bin=args.python,
+            tracker_name=args.mcbyte_name,
+            split=args.split,
+            cores=args.cores,
+            do_preproc=args.do_preproc,
+            metrics=args.metrics,
+            gt_root=gt_root,
+            trackers_root=trackers_root,
+            trackeval_verbose=args.trackeval_verbose,
+        )
+        _print_trackeval_compact_summary(
+            trackers_root=trackers_root,
+            split=args.split,
+            tracker_name=args.mcbyte_name,
+        )
+
+
+def cmd_simple(args: argparse.Namespace) -> None:
+    dataset_root, split = _resolve_dancetrack_root_and_split(
+        dataset_path=args.dataset,
+        split_override=args.split,
+    )
+    gt_root = Path(args.trackeval_gt_root).expanduser().resolve()
+    trackers_root = Path(args.trackers_root).expanduser().resolve()
+    seqmap_file = gt_root / "seqmaps" / f"DanceTrack-{split}.txt"
+    seqs = _read_seqs(seqmap_file)
+    detection_source = _infer_detection_source(dataset_root=dataset_root, split=split, seqs=seqs)
+
+    run_args = argparse.Namespace(
+        python=args.python,
+        tracker=args.tracker,
+        split=split,
+        detection_source=detection_source,
+        dataset_root=str(dataset_root),
+        trackeval_gt_root=str(gt_root),
+        trackers_root=str(trackers_root),
+        bytetrack_name=args.bytetrack_name or _default_tracker_output_name("bytetrack", detection_source),
+        ocsort_name=args.ocsort_name or _default_tracker_output_name("ocsort", detection_source),
+        mcbyte_name=args.mcbyte_name or _default_tracker_output_name("mcbyte", detection_source),
+        min_det_score=args.min_det_score,
+        cores=8,
+        metrics=["HOTA", "CLEAR", "Identity"],
+        do_preproc="False",
+        trackeval_verbose=False,
+    )
+
+    print(
+        f"[INFO] Simple mode config: tracker={run_args.tracker} "
+        f"dataset_root={run_args.dataset_root} split={run_args.split} "
+        f"detection_source={run_args.detection_source}"
+    )
+    cmd_run(run_args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -352,7 +492,7 @@ def build_parser() -> argparse.ArgumentParser:
     detect.set_defaults(func=cmd_detect)
 
     def add_track_args(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--tracker", choices=["bytetrack", "ocsort", "both"], default="both")
+        p.add_argument("--tracker", choices=["bytetrack", "ocsort", "mcbyte", "both", "all"], default="both")
         p.add_argument("--split", default="val")
         p.add_argument("--detection-source", choices=["gt", "det"], default="gt")
         p.add_argument("--dataset-root", default="benchmarks/datasets/DanceTrack")
@@ -360,6 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--trackers-root", default="benchmarks/trackeval_data/trackers/mot_challenge")
         p.add_argument("--bytetrack-name", default="bytetrack_baseline")
         p.add_argument("--ocsort-name", default="ocsort_baseline")
+        p.add_argument("--mcbyte-name", default="mcbyte_baseline")
         p.add_argument("--min-det-score", type=float, default=0.0)
 
     def add_eval_args(
@@ -395,12 +536,47 @@ def build_parser() -> argparse.ArgumentParser:
     add_eval_args(run, include_split=False, include_paths=False)
     run.set_defaults(func=cmd_run)
 
+    simple = subparsers.add_parser(
+        "simple",
+        help="Minimal interface: pass only tracker + dataset (name or path), infer the rest.",
+    )
+    simple.add_argument("tracker", choices=["bytetrack", "ocsort", "mcbyte", "both", "all"])
+    simple.add_argument(
+        "dataset",
+        help=(
+            "Dataset name or path. Use 'dancetrack' for defaults, or pass a path to "
+            "DanceTrack root/split folder."
+        ),
+    )
+    simple.add_argument(
+        "--split",
+        choices=["train", "val", "test"],
+        default=None,
+        help="Optional split override. If omitted, inferred from path naming conventions.",
+    )
+    simple.add_argument("--trackeval-gt-root", default=str(_default_trackeval_gt_root()))
+    simple.add_argument("--trackers-root", default=str(_default_trackers_root()))
+    simple.add_argument("--bytetrack-name", default=None)
+    simple.add_argument("--ocsort-name", default=None)
+    simple.add_argument("--mcbyte-name", default=None)
+    simple.add_argument("--min-det-score", type=float, default=0.0)
+    simple.set_defaults(func=cmd_simple)
+
     return parser
 
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+
+    # Convenience alias:
+    #   python benchmarks/run_benchmark.py <tracker> <dataset>
+    # behaves like:
+    #   python benchmarks/run_benchmark.py simple <tracker> <dataset>
+    if argv and argv[0] in {"bytetrack", "ocsort", "mcbyte", "both", "all"}:
+        argv = ["simple", *argv]
+
+    args = parser.parse_args(argv)
     args.func(args)
 
 

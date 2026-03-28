@@ -32,12 +32,32 @@ python benchmarks/run_benchmark.py detect --split val --model-size small --batch
 ```bash
 conda activate joey
 pip install numpy trackers supervision
-python benchmarks/run_benchmark.py run --tracker bytetrack --split val --detection-source det --bytetrack-name bytetrack_supervision
+python benchmarks/run_benchmark.py bytetrack dancetrack
 ```
 
 Notes:
 - DanceTrack `test` has no public GT, so local TrackEval is for `train`/`val`.
 - You can still generate detections and tracking outputs for `test` for eventual benchmark submission workflows.
+- `run_benchmark.py` now has a simplified interface: pass only tracker (`bytetrack`, `ocsort`, `mcbyte`, `both`, `all`) and dataset.
+  - Fastest form: `python benchmarks/run_benchmark.py ocsort dancetrack`
+  - McByte is also supported: `python benchmarks/run_benchmark.py mcbyte dancetrack`
+  - You can still pass a path instead of the name if needed.
+  - If dataset path points to `.../DanceTrack/val` (or `train`/`test`), split is inferred from that folder name.
+  - If dataset path points to `.../DanceTrack`, split defaults to `val` when present, then `train`, then `test`.
+  - Detection source is inferred from files: uses `det` when all `det/det.txt` files exist; otherwise falls back to `gt` when complete.
+
+3. Compare all configured trackers with one command:
+
+```bash
+python benchmarks/compare_trackers.py dancetrack
+```
+
+Notes:
+- This runs all trackers listed in `CONFIGURED_TRACKERS` inside `benchmarks/compare_trackers.py`.
+- Output is a compact table:
+  - rows = metrics (`HOTA`, `IDF1`, `MOTA`, `DetRe`, `DetPr`, `IDSW`, `Frag`)
+  - columns = trackers
+  - final `Best` column shows the winning tracker per metric
 
 ## Quick Start
 

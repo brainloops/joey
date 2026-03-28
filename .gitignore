@@ -8,3 +8,10 @@ benchmarks/trackeval_data/
 *.pt
 *.ckpt
 *.weights
+
+# Python bytecode/cache artifacts (any folder)
+__pycache__/
+*.py[cod]
+
+# McByte runtime debug log
+logging_info.txt

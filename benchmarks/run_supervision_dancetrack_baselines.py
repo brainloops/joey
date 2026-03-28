@@ -6,11 +6,12 @@ import argparse
 import configparser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 np = None
 sv = None
 tk = None
+mcbyte_adapter = None
 
 
 @dataclass
@@ -30,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tracker",
-        choices=["bytetrack", "ocsort", "both"],
+        choices=["bytetrack", "ocsort", "mcbyte", "both", "all"],
         default="both",
         help="Which tracker(s) to run.",
     )
@@ -71,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         help="Output tracker folder name for OCSort.",
     )
     parser.add_argument(
+        "--mcbyte-name",
+        default="mcbyte_baseline",
+        help="Output tracker folder name for McByte.",
+    )
+    parser.add_argument(
         "--min-det-score",
         type=float,
         default=0.0,
@@ -93,12 +99,16 @@ def read_seqmap(seqmap_file: Path) -> List[str]:
     return seqs
 
 
-def read_seq_length(seqinfo_file: Path) -> int:
+def read_seq_info(seqinfo_file: Path) -> Tuple[int, int, int]:
     if not seqinfo_file.is_file():
         raise FileNotFoundError(f"Missing seqinfo.ini: {seqinfo_file}")
     cfg = configparser.ConfigParser()
     cfg.read(seqinfo_file)
-    return int(cfg["Sequence"]["seqLength"])
+    seq_cfg = cfg["Sequence"]
+    seq_len = int(seq_cfg["seqLength"])
+    width = int(seq_cfg.get("imWidth", 0))
+    height = int(seq_cfg.get("imHeight", 0))
+    return seq_len, width, height
 
 
 def parse_mot_rows(path: Path, source: str, min_score: float) -> Dict[int, List[DetectionRow]]:
@@ -154,13 +164,12 @@ def to_detections(rows: Iterable[DetectionRow]) -> sv.Detections:
 
 
 def create_tracker(name: str):
-    if tk is None:
-        raise RuntimeError(
-            "Missing dependency 'trackers'. Install with:\n"
-            "  pip install trackers"
-        )
-
     if name == "bytetrack":
+        if tk is None:
+            raise RuntimeError(
+                "Missing dependency 'trackers'. Install with:\n"
+                "  pip install trackers"
+            )
         for attr in ("ByteTrackTracker", "BYTESORTTracker", "BYTETrackTracker"):
             if hasattr(tk, attr):
                 return getattr(tk, attr)()
@@ -169,12 +178,26 @@ def create_tracker(name: str):
         )
 
     if name == "ocsort":
+        if tk is None:
+            raise RuntimeError(
+                "Missing dependency 'trackers'. Install with:\n"
+                "  pip install trackers"
+            )
         for attr in ("OCSORTTracker", "OCSortTracker", "OcSortTracker"):
             if hasattr(tk, attr):
                 return getattr(tk, attr)()
         raise AttributeError(
             "trackers package does not expose an OCSORT tracker class in this version."
         )
+
+    if name == "mcbyte":
+        if mcbyte_adapter is None:
+            raise RuntimeError(
+                "Missing dependency 'yolox' (McByte package). Install McByte first, e.g.:\n"
+                "  python -m pip install -e /home/david/projects/McByte --no-build-isolation"
+            )
+        cfg = mcbyte_adapter.McByteRfDetrConfig()
+        return mcbyte_adapter.McByteRfDetrAdapter(config=cfg, save_folder=".")
 
     raise ValueError(f"Unsupported tracker name: {name}")
 
@@ -260,6 +283,73 @@ def export_sequence_results(
     return total_input_dets, len(lines)
 
 
+def _rows_to_xyxy_conf(rows: Iterable[DetectionRow]) -> np.ndarray:
+    rows_list = list(rows)
+    if not rows_list:
+        return np.zeros((0, 5), dtype=np.float32)
+    out = np.zeros((len(rows_list), 5), dtype=np.float32)
+    for i, r in enumerate(rows_list):
+        out[i, 0] = float(r.x)
+        out[i, 1] = float(r.y)
+        out[i, 2] = float(r.x + r.w)
+        out[i, 3] = float(r.y + r.h)
+        out[i, 4] = float(r.conf)
+    return out
+
+
+def _read_frame_or_blank(seq_root: Path, frame_idx: int, width: int, height: int):
+    import cv2
+
+    candidate_exts = [".jpg", ".jpeg", ".png", ".webp", ".bmp"]
+    img_dir = seq_root / "img1"
+    for ext in candidate_exts:
+        p = img_dir / f"{frame_idx:08d}{ext}"
+        if p.is_file():
+            frame = cv2.imread(str(p))
+            if frame is not None:
+                return frame
+    h = max(1, height)
+    w = max(1, width)
+    return np.zeros((h, w, 3), dtype=np.uint8)
+
+
+def export_sequence_results_mcbyte(
+    out_file: Path,
+    seq_root: Path,
+    seq_name: str,
+    seq_length: int,
+    seq_width: int,
+    seq_height: int,
+    detections_by_frame: Dict[int, List[DetectionRow]],
+) -> Tuple[int, int]:
+    tracker = create_tracker("mcbyte")
+    lines: List[str] = []
+    total_input_dets = 0
+
+    for frame_idx in range(1, seq_length + 1):
+        frame_rows = detections_by_frame.get(frame_idx, [])
+        total_input_dets += len(frame_rows)
+        frame_img = _read_frame_or_blank(seq_root=seq_root, frame_idx=frame_idx, width=seq_width, height=seq_height)
+        dets_xyxy_conf = _rows_to_xyxy_conf(frame_rows)
+        tracked = tracker.step(frame_img, dets_xyxy_conf)
+        for tr in tracked:
+            track_id = int(tr["track_id"])
+            x, y, w, h = tr["tlwh"]
+            score = float(tr["score"])
+            if track_id < 0:
+                continue
+            lines.append(
+                f"{frame_idx},{track_id},{x:.6f},{y:.6f},{w:.6f},{h:.6f},{score:.6f},-1,-1,-1"
+            )
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text("\n".join(lines) + ("\n" if lines else ""))
+    print(
+        f"[DONE] tracker=mcbyte seq={seq_name} inputs={total_input_dets} outputs={len(lines)} -> {out_file}"
+    )
+    return total_input_dets, len(lines)
+
+
 def run_tracker_over_split(
     tracker_name: str,
     tracker_folder_name: str,
@@ -279,17 +369,28 @@ def run_tracker_over_split(
     for seq in seqs:
         seq_root = dataset_root / split / seq
         seqinfo = seq_root / "seqinfo.ini"
-        seq_len = read_seq_length(seqinfo)
+        seq_len, seq_w, seq_h = read_seq_info(seqinfo)
         source_file = seq_root / ("gt/gt.txt" if detection_source == "gt" else "det/det.txt")
         dets_by_frame = parse_mot_rows(source_file, detection_source, min_det_score)
         seq_out = out_dir / f"{seq}.txt"
-        in_count, out_count = export_sequence_results(
-            out_file=seq_out,
-            tracker_name=tracker_name,
-            seq_name=seq,
-            seq_length=seq_len,
-            detections_by_frame=dets_by_frame,
-        )
+        if tracker_name == "mcbyte":
+            in_count, out_count = export_sequence_results_mcbyte(
+                out_file=seq_out,
+                seq_root=seq_root,
+                seq_name=seq,
+                seq_length=seq_len,
+                seq_width=seq_w,
+                seq_height=seq_h,
+                detections_by_frame=dets_by_frame,
+            )
+        else:
+            in_count, out_count = export_sequence_results(
+                out_file=seq_out,
+                tracker_name=tracker_name,
+                seq_name=seq,
+                seq_length=seq_len,
+                detections_by_frame=dets_by_frame,
+            )
         total_in += in_count
         total_out += out_count
 
@@ -304,6 +405,7 @@ def main() -> None:
     global np
     global sv
     global tk
+    global mcbyte_adapter
 
     try:
         import numpy as np_module
@@ -314,25 +416,53 @@ def main() -> None:
         ) from exc
     np = np_module
 
-    try:
-        import trackers as tk_module
-    except Exception as exc:
-        raise RuntimeError(
-            "Missing dependency 'trackers'. Install with:\n"
-            "  pip install trackers"
-        ) from exc
+    trackers_needed = args.tracker in ("bytetrack", "ocsort", "both", "all")
+    if trackers_needed:
+        try:
+            import trackers as tk_module
+        except Exception as exc:
+            raise RuntimeError(
+                "Missing dependency 'trackers'. Install with:\n"
+                "  pip install trackers"
+            ) from exc
+    else:
+        tk_module = None
 
     # trackers works with supervision.Detections objects for detector/tracker interchange.
-    try:
-        import supervision as sv_module
-    except Exception as exc:
-        raise RuntimeError(
-            "Missing dependency 'supervision'. Install with:\n"
-            "  pip install supervision"
-        ) from exc
+    if trackers_needed:
+        try:
+            import supervision as sv_module
+        except Exception as exc:
+            raise RuntimeError(
+                "Missing dependency 'supervision'. Install with:\n"
+                "  pip install supervision"
+            ) from exc
+    else:
+        sv_module = None
+
+    mcbyte_needed = args.tracker in ("mcbyte", "all")
+    if mcbyte_needed:
+        try:
+            from yolox.tracker import rfdetr_adapter as mcbyte_adapter_module
+        except ModuleNotFoundError as exc:
+            missing_pkg = exc.name or "unknown package"
+            raise RuntimeError(
+                "McByte import failed due to a missing dependency.\n"
+                f"Missing package: {missing_pkg}\n"
+                "Install McByte runtime dependencies, for example:\n"
+                "  python -m pip install -r /home/david/projects/McByte/requirements.txt"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                "Missing McByte adapter (yolox.tracker.rfdetr_adapter). "
+                "Install McByte in this environment first."
+            ) from exc
+    else:
+        mcbyte_adapter_module = None
 
     sv = sv_module
     tk = tk_module
+    mcbyte_adapter = mcbyte_adapter_module
 
     dataset_root = Path(args.dataset_root).resolve()
     trackeval_gt_root = Path(args.trackeval_gt_root).resolve()
@@ -342,10 +472,18 @@ def main() -> None:
     seqs = read_seqmap(seqmap)
 
     trackers_to_run: List[Tuple[str, str]]
-    if args.tracker == "both":
+    if args.tracker == "all":
+        trackers_to_run = [
+            ("bytetrack", args.bytetrack_name),
+            ("ocsort", args.ocsort_name),
+            ("mcbyte", args.mcbyte_name),
+        ]
+    elif args.tracker == "both":
         trackers_to_run = [("bytetrack", args.bytetrack_name), ("ocsort", args.ocsort_name)]
     elif args.tracker == "bytetrack":
         trackers_to_run = [("bytetrack", args.bytetrack_name)]
+    elif args.tracker == "mcbyte":
+        trackers_to_run = [("mcbyte", args.mcbyte_name)]
     else:
         trackers_to_run = [("ocsort", args.ocsort_name)]
 
