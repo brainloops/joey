@@ -1,3 +1,10 @@
 # Benchmark downloads (local-only artifacts)
 benchmarks/datasets/
 benchmarks/repos/
+benchmarks/trackeval_data/
+
+# Model checkpoints / weights
+*.pth
+*.pt
+*.ckpt
+*.weights

@@ -32,6 +32,9 @@ todos:
   - id: benchmark-integration
     content: Add benchmark dataset adapters and TrackEval-compatible evaluation pipeline for cross-dataset comparison.
     status: pending
+  - id: trackeval-integration
+    content: Integrate TrackEval as the canonical evaluator for internal clips and public benchmarks.
+    status: pending
   - id: basketball-internal-validation
     content: Build internal basketball validation set from annotated game actions and track-quality scorecards.
     status: pending
@@ -66,7 +69,7 @@ isProject: false
 
 ## Current Starting Point
 
-- Repository is effectively empty; only `[/home/david/joey/README.md](/home/david/joey/README.md)` exists.
+- Repository is effectively empty; only [`README.md`](README.md) exists.
 - We will treat this as a greenfield build with selective algorithm borrowing from OC-SORT / ByteTrack / DeepSORT / McByte ideas.
 
 ## Product Goal
@@ -170,6 +173,24 @@ flowchart LR
   - We can run end-to-end evaluation on at least one split each from DanceTrack and SportsMOT.
   - We can compare our tracker against baseline OC-SORT/ByteTrack style settings using the same evaluation protocol.
 
+## TrackEval Integration (Canonical Evaluation)
+
+- Evaluation backbone:
+  - Use [TrackEval](https://github.com/JonathonLuiten/TrackEval) as the canonical metric engine for all leaderboard results.
+  - TrackEval metrics in scope: HOTA family, Identity metrics (IDF1/IDP/IDR), and CLEAR metrics (MOTA, Frag, etc.).
+- Scope of usage:
+  - Public benchmarks: DanceTrack, TeamTrack/SportsMOT (where format-compatible), MOT17, MOT20.
+  - Internal basketball validation clips: convert/export to MOTChallenge-compatible structure for TrackEval runs.
+- Data contract for evaluator inputs:
+  - Ground truth and tracker outputs stored in MOTChallenge-compatible file layout and text format.
+  - Naming conventions and sequence metadata (`seqinfo.ini`) standardized so all tracker variants are directly comparable.
+- Reproducibility policy:
+  - Each evaluation run stores: tracker name/version, config snapshot, commit hash, dataset split, and TrackEval command/config used.
+  - Persist both summary metric tables and per-sequence detail outputs.
+- Operational policy:
+  - Treat TrackEval outputs as source-of-truth for model promotion, baseline comparisons, and leaderboard updates.
+  - Use SAM3 parquet analytics as complementary diagnostics, not as replacement for canonical benchmark metrics.
+
 ### Labeling Strategy (summary only)
 
 - Labeling is a major pillar of this project and now has a dedicated plan:
@@ -269,6 +290,7 @@ flowchart LR
   - [OC_SORT](https://github.com/noahcao/OC_SORT) - MIT; primary reference for observation-centric motion handling and robust crowded-scene association.
   - [ByteTrack](https://github.com/FoundationVision/ByteTrack) - MIT; primary reference for two-stage high/low confidence detection association.
   - [deep_sort](https://github.com/nwojke/deep_sort) - GPL-3.0; reference for appearance metric design patterns only unless we isolate or replace GPL-bound code paths.
+  - [TrackEval](https://github.com/JonathonLuiten/TrackEval) - MIT; canonical evaluation framework for HOTA, IDF1, MOTA, and related MOT metrics.
 - Intake order for MVP:
   1. ByteTrack and OC-SORT (baseline core association).
   2. McByte (mask propagation signal integration pattern).
