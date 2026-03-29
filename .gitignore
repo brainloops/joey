@@ -1,5 +1,6 @@
 # Benchmark downloads (local-only artifacts)
 benchmarks/datasets/
+benchmarks/dataprep/clips/
 benchmarks/repos/
 benchmarks/trackeval_data/
 

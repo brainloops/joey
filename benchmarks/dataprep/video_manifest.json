@@ -1,0 +1,129 @@
+{
+  "manifest_version": 1,
+  "dataset_name": "HoopsTrack10",
+  "description": "Initial custom basketball MOT dataset selection manifest.",
+  "selection_plan": {
+    "target_total_videos": 10,
+    "target_per_category": 2,
+    "categories": [
+      "hs_jv",
+      "hs_varsity",
+      "hs_modified",
+      "aau",
+      "public_youtube"
+    ]
+  },
+  "processing_defaults": {
+    "clip_duration_sec": 30,
+    "trim_then_resize": true,
+    "resize_width": 1920,
+    "resize_height": 1080,
+    "fps_mode": "preserve"
+  },
+  "output": {
+    "dataset_root": "benchmarks/datasets/HoopsTrack10",
+    "split": "train"
+  },
+  "clips": [
+    {
+      "clip_id": "personal_highschool_01",
+      "source_key": "personal_film/highschool/2026-01-06_Cornwall_vs_Port_Jervis/2026-01-06_Cornwall_vs_Port_Jervis_JV.m4v",
+      "source_path": "/media/david/beast/Dropbox/basketball-film/highschool/2026-01-06_Cornwall_vs_Port_Jervis/2026-01-06_Cornwall_vs_Port_Jervis_JV.m4v",
+      "origin": "personal",
+      "level_tag": "highschool",
+      "start_sec": 0,
+      "end_sec": 30,
+      "notes": "Cornwall vs Port Jervis JV. First 30 seconds."
+    },
+    {
+      "clip_id": "personal_highschool_02",
+      "source_key": "personal_film/highschool/2025-12-05-monroe-basketball/Monroe vs Valley Central Varsity.m4v",
+      "source_path": "/media/david/beast/Dropbox/basketball-film/highschool/2025-12-05-monroe-basketball/Monroe vs Valley Central Varsity.m4v",
+      "origin": "personal",
+      "level_tag": "highschool",
+      "start_sec": 15,
+      "end_sec": 45,
+      "notes": "Monroe vs Valley Central Varsity. 15s to 45s."
+    },
+    {
+      "clip_id": "personal_aau_01",
+      "source_key": "personal_film/aau/NY Finest/2025-10-18-NY Finest at Fall Mayhem Classic Spooky Nook/NY Finest vs Steel City Outlaws.m4v",
+      "source_path": "/media/david/beast/Dropbox/basketball-film/aau/NY Finest/2025-10-18-NY Finest at Fall Mayhem Classic Spooky Nook/NY Finest vs Steel City Outlaws.m4v",
+      "origin": "personal",
+      "level_tag": "aau",
+      "start_sec": 2340,
+      "end_sec": 2370,
+      "notes": "NY Finest vs Steel City Outlaws. 39:00 to 39:30."
+    },
+    {
+      "clip_id": "personal_aau_02",
+      "source_key": "personal_film/aau/OC KIngs/scranton/OC_Kings_vs_NEPA_NXT_Himmelberg_1st_half.MP4",
+      "source_path": "/media/david/beast/Dropbox/basketball-film/aau/OC KIngs/scranton/OC_Kings_vs_NEPA_NXT_Himmelberg_1st_half.MP4",
+      "origin": "personal",
+      "level_tag": "aau",
+      "start_sec": 60,
+      "end_sec": 90,
+      "notes": "OC Kings vs NEPA NXT Himmelberg first half. 1:00 to 1:30."
+    },
+    {
+      "clip_id": "personal_cyo_01",
+      "source_key": "personal_film/cyo/CYO 2025 Quarter Finals/2025 CYO State Quarterfinals.m4v",
+      "source_path": "/media/david/beast/Dropbox/basketball-film/cyo/CYO 2025 Quarter Finals/2025 CYO State Quarterfinals.m4v",
+      "origin": "personal",
+      "level_tag": "cyo",
+      "start_sec": 35,
+      "end_sec": 65,
+      "notes": "2025 CYO State Quarterfinals. 0:35 to 1:05."
+    },
+    {
+      "clip_id": "personal_cyo_02",
+      "source_key": "personal_film/cyo/CYO 2025 State Semifinals/CYO State Semifinal.m4v",
+      "source_path": "/media/david/beast/Dropbox/basketball-film/cyo/CYO 2025 State Semifinals/CYO State Semifinal.m4v",
+      "origin": "personal",
+      "level_tag": "cyo",
+      "start_sec": 460,
+      "end_sec": 490,
+      "notes": "CYO State Semifinal. 7:40 to 8:10."
+    },
+    {
+      "clip_id": "public_highschool_01",
+      "source_key": "public_film/highschool/fl/Game 1 - De La Salle vs. Bartow.mp4",
+      "source_path": "/media/david/beast/youtube-basketball/highschool/fl/Game 1 - De La Salle vs. Bartow.mp4",
+      "origin": "public",
+      "level_tag": "highschool",
+      "start_sec": 278,
+      "end_sec": 308,
+      "notes": "High school (Florida). 4:38 to 5:08."
+    },
+    {
+      "clip_id": "public_highschool_02",
+      "source_key": "public_film/highschool/va/Bishop O'Connell vs (#1) Paul VI Game- 2025-26 DSN DMV HS Weekend Private School Series.mp4",
+      "source_path": "/media/david/beast/youtube-basketball/highschool/va/Bishop O'Connell vs (#1) Paul VI Game- 2025-26 DSN DMV HS Weekend Private School Series.mp4",
+      "origin": "public",
+      "level_tag": "highschool",
+      "start_sec": 315,
+      "end_sec": 345,
+      "notes": "High school (Virginia). 5:15 to 5:45."
+    },
+    {
+      "clip_id": "public_college_01",
+      "source_key": "public_film/college/nc/Duke vs. Boston College Full Game Replay ｜ 2025-26 ACC Men's Basketball.mp4",
+      "source_path": "/media/david/beast/youtube-basketball/college/nc/Duke vs. Boston College Full Game Replay ｜ 2025-26 ACC Men's Basketball.mp4",
+      "origin": "public",
+      "level_tag": "college",
+      "start_sec": 170,
+      "end_sec": 200,
+      "notes": "College (NC). 2:50 to 3:20."
+    },
+    {
+      "clip_id": "public_college_02",
+      "source_key": "public_film/college/tx/Arizona vs. TCU Full Game Replay (1.10.26) ｜ 2025-26 Big 12 Men's Basketball.mp4",
+      "source_path": "/media/david/beast/youtube-basketball/college/tx/Arizona vs. TCU Full Game Replay (1.10.26) ｜ 2025-26 Big 12 Men's Basketball.mp4",
+      "origin": "public",
+      "level_tag": "college",
+      "start_sec": 371,
+      "end_sec": 401,
+      "notes": "College (TX). 6:11 to 6:41."
+    }
+  ]
+}
