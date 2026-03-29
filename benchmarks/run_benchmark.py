@@ -39,6 +39,8 @@ def _resolve_dataset_identifier(dataset: str) -> Path:
         return (_benchmarks_dir() / "datasets" / "SportsMOT").resolve()
     if key in {"teamtrack", "team-track", "tt"}:
         return (_benchmarks_dir() / "datasets" / "TeamTrack").resolve()
+    if key in {"basketballmot", "basketball-mot", "bbmot"}:
+        return (_benchmarks_dir() / "datasets" / "BasketballMOT").resolve()
     return Path(dataset).expanduser().resolve()
 
 
@@ -66,6 +68,8 @@ def _infer_benchmark_from_dataset_root(dataset_root: Path) -> str:
         return "SportsMOT"
     if key == "teamtrack":
         return "TeamTrack"
+    if key == "basketballmot":
+        return "BasketballMOT"
     return "DanceTrack"
 
 
@@ -188,6 +192,8 @@ def _validate_trackeval_inputs(
             prep_hint = "bash benchmarks/prepare_sportsmot_for_trackeval.sh"
         if benchmark == "TeamTrack":
             prep_hint = "bash benchmarks/prepare_teamtrack_for_trackeval.sh"
+        if benchmark == "BasketballMOT":
+            prep_hint = "python benchmarks/dataprep/build_basketballmot_dataset.py"
         raise FileNotFoundError(
             f"GT split folder missing: {gt_split_dir}\n"
             f"Run: {prep_hint}"
@@ -200,6 +206,8 @@ def _validate_trackeval_inputs(
             prep_hint = "bash benchmarks/prepare_sportsmot_for_trackeval.sh"
         if benchmark == "TeamTrack":
             prep_hint = "bash benchmarks/prepare_teamtrack_for_trackeval.sh"
+        if benchmark == "BasketballMOT":
+            prep_hint = "python benchmarks/dataprep/build_basketballmot_dataset.py"
         raise FileNotFoundError(
             f"Seqmap file missing: {seqmap_file}\n"
             f"Run: {prep_hint}"
@@ -581,7 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
     detect = subparsers.add_parser("detect", help="Generate MOT-style detections with RF-DETR.")
     detect.add_argument(
         "--benchmark",
-        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack", "BasketballMOT"],
         default="DanceTrack",
     )
     detect.add_argument("--split", default="val", choices=["train", "val", "test"])
@@ -599,7 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_track_args(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--benchmark",
-            choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+            choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack", "BasketballMOT"],
             default="DanceTrack",
         )
         p.add_argument("--tracker", choices=["bytetrack", "ocsort", "mcbyte", "both", "all"], default="both")
@@ -639,7 +647,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p = subparsers.add_parser("eval", help="Run TrackEval for one tracker output folder.")
     eval_p.add_argument(
         "--benchmark",
-        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack", "BasketballMOT"],
         default="DanceTrack",
     )
     add_eval_args(eval_p)
@@ -659,7 +667,7 @@ def build_parser() -> argparse.ArgumentParser:
     simple.add_argument(
         "dataset",
         help=(
-            "Dataset name or path. Supported shortcuts: dancetrack, mot17, mot20, sportsmot, teamtrack. "
+            "Dataset name or path. Supported shortcuts: dancetrack, mot17, mot20, sportsmot, teamtrack, basketballmot. "
             "You can also pass a path to a dataset root/split folder."
         ),
     )
@@ -673,7 +681,7 @@ def build_parser() -> argparse.ArgumentParser:
     simple.add_argument("--trackers-root", default=str(_default_trackers_root()))
     simple.add_argument(
         "--benchmark",
-        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack", "BasketballMOT"],
         default=None,
         help="Optional benchmark override. If omitted, inferred from dataset root name.",
     )

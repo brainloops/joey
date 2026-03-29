@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--benchmark",
         default="DanceTrack",
-        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack", "BasketballMOT"],
         help="Benchmark name used for TrackEval folder/seqmap naming.",
     )
     parser.add_argument(

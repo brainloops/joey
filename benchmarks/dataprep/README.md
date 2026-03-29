@@ -57,3 +57,23 @@ Script behavior:
 - trims each clip to `[start_sec, end_sec]`
 - writes clips to `benchmarks/dataprep/clips/<clip_id>/clip.mp4`
 - downscales to 1920x1080 when source is larger than 1080p
+
+## Build BasketballMOT frames
+
+After clips exist, build MOT-style sequence folders:
+
+```bash
+python benchmarks/dataprep/build_basketballmot_dataset.py
+```
+
+This creates:
+
+- `benchmarks/datasets/BasketballMOT/train/<clip_id>/img1/%06d.jpg`
+- `benchmarks/datasets/BasketballMOT/train/<clip_id>/seqinfo.ini`
+- `benchmarks/datasets/BasketballMOT/train/<clip_id>/gt/gt.txt` (placeholder)
+- `benchmarks/datasets/BasketballMOT/train/<clip_id>/det/`
+
+And TrackEval metadata:
+
+- `benchmarks/trackeval_data/gt/mot_challenge/BasketballMOT-train/<clip_id>` (symlink)
+- `benchmarks/trackeval_data/gt/mot_challenge/seqmaps/BasketballMOT-train.txt`

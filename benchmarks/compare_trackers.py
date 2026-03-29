@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         "dataset",
         help=(
             "Dataset name or path (e.g. 'dancetrack', 'mot17', 'mot20', "
-            "'sportsmot', 'teamtrack', or a dataset root/split path)."
+            "'sportsmot', 'teamtrack', 'basketballmot', or a dataset root/split path)."
         ),
     )
     parser.add_argument(

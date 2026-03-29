@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--benchmark",
         default="MOT17",
-        choices=["MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        choices=["MOT17", "MOT20", "SportsMOT", "TeamTrack", "BasketballMOT"],
         help="MOT benchmark dataset family.",
     )
     parser.add_argument(
@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         choices=["FRCNN", "DPM", "SDP", "all"],
         help=(
             "MOT17 sequence subset selector. Ignored for MOT20. "
-            "Ignored for SportsMOT/TeamTrack. "
+            "Ignored for SportsMOT/TeamTrack/BasketballMOT. "
             "Use one detector subset to avoid triplicate scene variants."
         ),
     )
