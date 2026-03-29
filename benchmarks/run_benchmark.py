@@ -31,6 +31,14 @@ def _resolve_dataset_identifier(dataset: str) -> Path:
     key = dataset.strip().lower()
     if key in {"dancetrack", "dance-track", "dt"}:
         return (_benchmarks_dir() / "datasets" / "DanceTrack").resolve()
+    if key in {"mot17", "mot-17"}:
+        return (_benchmarks_dir() / "datasets" / "MOT17").resolve()
+    if key in {"mot20", "mot-20"}:
+        return (_benchmarks_dir() / "datasets" / "MOT20").resolve()
+    if key in {"sportsmot", "sports-mot", "smot"}:
+        return (_benchmarks_dir() / "datasets" / "SportsMOT").resolve()
+    if key in {"teamtrack", "team-track", "tt"}:
+        return (_benchmarks_dir() / "datasets" / "TeamTrack").resolve()
     return Path(dataset).expanduser().resolve()
 
 
@@ -46,8 +54,28 @@ def _format_compact_row(data: Dict[str, str]) -> str:
     )
 
 
-def _print_trackeval_compact_summary(trackers_root: Path, split: str, tracker_name: str) -> None:
-    tracker_dir = trackers_root / f"DanceTrack-{split}" / tracker_name
+def _infer_benchmark_from_dataset_root(dataset_root: Path) -> str:
+    key = dataset_root.name.lower()
+    if key == "dancetrack":
+        return "DanceTrack"
+    if key == "mot17":
+        return "MOT17"
+    if key == "mot20":
+        return "MOT20"
+    if key == "sportsmot":
+        return "SportsMOT"
+    if key == "teamtrack":
+        return "TeamTrack"
+    return "DanceTrack"
+
+
+def _print_trackeval_compact_summary(
+    trackers_root: Path,
+    benchmark: str,
+    split: str,
+    tracker_name: str,
+) -> None:
+    tracker_dir = trackers_root / f"{benchmark}-{split}" / tracker_name
     summary_file = tracker_dir / "pedestrian_summary.txt"
     detailed_file = tracker_dir / "pedestrian_detailed.csv"
     if not summary_file.is_file():
@@ -66,7 +94,7 @@ def _print_trackeval_compact_summary(trackers_root: Path, split: str, tracker_na
     compact = {k: metrics.get(k, "NA") for k in wanted}
 
     print()
-    print(f"[COMPACT] DanceTrack-{split} | tracker={tracker_name}")
+    print(f"[COMPACT] {benchmark}-{split} | tracker={tracker_name}")
     print("   HOTA     IDF1     MOTA    DetRe    DetPr     IDSW     Frag")
     print(_format_compact_row(compact))
 
@@ -141,20 +169,40 @@ def _read_seqs(seqmap_file: Path) -> List[str]:
     return seqs
 
 
-def _validate_trackeval_inputs(gt_root: Path, trackers_root: Path, split: str, tracker_name: str) -> None:
-    gt_split_dir = gt_root / f"DanceTrack-{split}"
-    seqmap_file = gt_root / "seqmaps" / f"DanceTrack-{split}.txt"
-    tracker_data_dir = trackers_root / f"DanceTrack-{split}" / tracker_name / "data"
+def _validate_trackeval_inputs(
+    gt_root: Path,
+    trackers_root: Path,
+    benchmark: str,
+    split: str,
+    tracker_name: str,
+) -> None:
+    gt_split_dir = gt_root / f"{benchmark}-{split}"
+    seqmap_file = gt_root / "seqmaps" / f"{benchmark}-{split}.txt"
+    tracker_data_dir = trackers_root / f"{benchmark}-{split}" / tracker_name / "data"
 
     if not gt_split_dir.is_dir():
+        prep_hint = "bash benchmarks/prepare_dancetrack_for_trackeval.sh"
+        if benchmark in {"MOT17", "MOT20"}:
+            prep_hint = f"bash benchmarks/prepare_motchallenge_for_trackeval.sh --benchmark {benchmark}"
+        if benchmark == "SportsMOT":
+            prep_hint = "bash benchmarks/prepare_sportsmot_for_trackeval.sh"
+        if benchmark == "TeamTrack":
+            prep_hint = "bash benchmarks/prepare_teamtrack_for_trackeval.sh"
         raise FileNotFoundError(
             f"GT split folder missing: {gt_split_dir}\n"
-            "Run: bash benchmarks/prepare_dancetrack_for_trackeval.sh"
+            f"Run: {prep_hint}"
         )
     if not seqmap_file.is_file():
+        prep_hint = "bash benchmarks/prepare_dancetrack_for_trackeval.sh"
+        if benchmark in {"MOT17", "MOT20"}:
+            prep_hint = f"bash benchmarks/prepare_motchallenge_for_trackeval.sh --benchmark {benchmark}"
+        if benchmark == "SportsMOT":
+            prep_hint = "bash benchmarks/prepare_sportsmot_for_trackeval.sh"
+        if benchmark == "TeamTrack":
+            prep_hint = "bash benchmarks/prepare_teamtrack_for_trackeval.sh"
         raise FileNotFoundError(
             f"Seqmap file missing: {seqmap_file}\n"
-            "Run: bash benchmarks/prepare_dancetrack_for_trackeval.sh"
+            f"Run: {prep_hint}"
         )
     if not tracker_data_dir.is_dir():
         raise FileNotFoundError(
@@ -175,7 +223,7 @@ def _validate_trackeval_inputs(gt_root: Path, trackers_root: Path, split: str, t
         raise RuntimeError("Populate all required <seq>.txt files and rerun.")
 
 
-def _resolve_dancetrack_root_and_split(dataset_path: str, split_override: Optional[str]) -> Tuple[Path, str]:
+def _resolve_dataset_root_and_split(dataset_path: str, split_override: Optional[str]) -> Tuple[Path, str]:
     path = _resolve_dataset_identifier(dataset_path)
     if not path.exists():
         raise FileNotFoundError(f"Dataset path does not exist: {path}")
@@ -244,21 +292,51 @@ def _default_tracker_output_name(tracker: str, detection_source: str) -> str:
 
 
 def cmd_detect(args: argparse.Namespace) -> None:
-    script = _benchmarks_dir() / "generate_dancetrack_detections_rfdetr.py"
-    cmd = [
-        args.python,
-        str(script),
-        "--split",
-        args.split,
-        "--dataset-root",
-        args.dataset_root,
-        "--model-size",
-        args.model_size,
-        "--threshold",
-        str(args.threshold),
-        "--batch-size",
-        str(args.batch_size),
-    ]
+    dataset_root = args.dataset_root
+    if dataset_root == "benchmarks/datasets/DanceTrack" and args.benchmark != "DanceTrack":
+        dataset_root = str(_benchmarks_dir() / "datasets" / args.benchmark)
+
+    if args.benchmark == "DanceTrack":
+        script = _benchmarks_dir() / "generate_dancetrack_detections_rfdetr.py"
+        cmd = [
+            args.python,
+            str(script),
+            "--split",
+            args.split,
+            "--dataset-root",
+            dataset_root,
+            "--model-size",
+            args.model_size,
+            "--threshold",
+            str(args.threshold),
+            "--batch-size",
+            str(args.batch_size),
+        ]
+    else:
+        script = _benchmarks_dir() / "generate_motchallenge_detections_rfdetr.py"
+        cmd = [
+            args.python,
+            str(script),
+            "--benchmark",
+            args.benchmark,
+            "--split",
+            args.split,
+            "--dataset-root",
+            dataset_root,
+            "--model-size",
+            args.model_size,
+            "--threshold",
+            str(args.threshold),
+            "--batch-size",
+            str(args.batch_size),
+            "--det-filename",
+            args.det_filename,
+        ]
+        if args.write_det_txt:
+            cmd.append("--write-det-txt")
+        if args.benchmark == "MOT17":
+            cmd.extend(["--detector", args.detector])
+
     if args.overwrite:
         cmd.append("--overwrite")
     if args.max_seqs is not None:
@@ -271,6 +349,8 @@ def cmd_track(args: argparse.Namespace) -> None:
     cmd = [
         args.python,
         str(script),
+        "--benchmark",
+        args.benchmark,
         "--tracker",
         args.tracker,
         "--split",
@@ -297,6 +377,7 @@ def cmd_track(args: argparse.Namespace) -> None:
 
 def _run_eval_for_tracker(
     python_bin: str,
+    benchmark: str,
     tracker_name: str,
     split: str,
     cores: int,
@@ -311,12 +392,18 @@ def _run_eval_for_tracker(
         raise FileNotFoundError(
             f"TrackEval runner not found: {trackeval_runner}\nExpected TrackEval under benchmarks/repos/TrackEval"
         )
-    _validate_trackeval_inputs(gt_root=gt_root, trackers_root=trackers_root, split=split, tracker_name=tracker_name)
+    _validate_trackeval_inputs(
+        gt_root=gt_root,
+        trackers_root=trackers_root,
+        benchmark=benchmark,
+        split=split,
+        tracker_name=tracker_name,
+    )
     cmd = [
         python_bin,
         str(trackeval_runner),
         "--BENCHMARK",
-        "DanceTrack",
+        benchmark,
         "--SPLIT_TO_EVAL",
         split,
         "--GT_FOLDER",
@@ -355,6 +442,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
     trackers_root = Path(args.trackers_root).resolve()
     _run_eval_for_tracker(
         python_bin=args.python,
+        benchmark=args.benchmark,
         tracker_name=args.tracker_name,
         split=args.split,
         cores=args.cores,
@@ -366,6 +454,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
     )
     _print_trackeval_compact_summary(
         trackers_root=trackers_root,
+        benchmark=args.benchmark,
         split=args.split,
         tracker_name=args.tracker_name,
     )
@@ -382,6 +471,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if args.tracker in ("bytetrack", "both"):
         _run_eval_for_tracker(
             python_bin=args.python,
+            benchmark=args.benchmark,
             tracker_name=args.bytetrack_name,
             split=args.split,
             cores=args.cores,
@@ -393,12 +483,14 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         _print_trackeval_compact_summary(
             trackers_root=trackers_root,
+            benchmark=args.benchmark,
             split=args.split,
             tracker_name=args.bytetrack_name,
         )
     if args.tracker in ("ocsort", "both"):
         _run_eval_for_tracker(
             python_bin=args.python,
+            benchmark=args.benchmark,
             tracker_name=args.ocsort_name,
             split=args.split,
             cores=args.cores,
@@ -410,12 +502,14 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         _print_trackeval_compact_summary(
             trackers_root=trackers_root,
+            benchmark=args.benchmark,
             split=args.split,
             tracker_name=args.ocsort_name,
         )
     if args.tracker in ("mcbyte", "all"):
         _run_eval_for_tracker(
             python_bin=args.python,
+            benchmark=args.benchmark,
             tracker_name=args.mcbyte_name,
             split=args.split,
             cores=args.cores,
@@ -427,24 +521,27 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         _print_trackeval_compact_summary(
             trackers_root=trackers_root,
+            benchmark=args.benchmark,
             split=args.split,
             tracker_name=args.mcbyte_name,
         )
 
 
 def cmd_simple(args: argparse.Namespace) -> None:
-    dataset_root, split = _resolve_dancetrack_root_and_split(
+    dataset_root, split = _resolve_dataset_root_and_split(
         dataset_path=args.dataset,
         split_override=args.split,
     )
+    benchmark = args.benchmark or _infer_benchmark_from_dataset_root(dataset_root)
     gt_root = Path(args.trackeval_gt_root).expanduser().resolve()
     trackers_root = Path(args.trackers_root).expanduser().resolve()
-    seqmap_file = gt_root / "seqmaps" / f"DanceTrack-{split}.txt"
+    seqmap_file = gt_root / "seqmaps" / f"{benchmark}-{split}.txt"
     seqs = _read_seqs(seqmap_file)
     detection_source = _infer_detection_source(dataset_root=dataset_root, split=split, seqs=seqs)
 
     run_args = argparse.Namespace(
         python=args.python,
+        benchmark=benchmark,
         tracker=args.tracker,
         split=split,
         detection_source=detection_source,
@@ -463,7 +560,7 @@ def cmd_simple(args: argparse.Namespace) -> None:
 
     print(
         f"[INFO] Simple mode config: tracker={run_args.tracker} "
-        f"dataset_root={run_args.dataset_root} split={run_args.split} "
+        f"benchmark={run_args.benchmark} dataset_root={run_args.dataset_root} split={run_args.split} "
         f"detection_source={run_args.detection_source}"
     )
     cmd_run(run_args)
@@ -471,7 +568,7 @@ def cmd_simple(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Central benchmark runner (Python-only) for DanceTrack detection/tracking/evaluation."
+        description="Central benchmark runner (Python-only) for MOT-style detection/tracking/evaluation."
     )
     parser.add_argument(
         "--python",
@@ -481,17 +578,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    detect = subparsers.add_parser("detect", help="Generate MOT detections (det/det.txt) with RF-DETR.")
+    detect = subparsers.add_parser("detect", help="Generate MOT-style detections with RF-DETR.")
+    detect.add_argument(
+        "--benchmark",
+        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        default="DanceTrack",
+    )
     detect.add_argument("--split", default="val", choices=["train", "val", "test"])
     detect.add_argument("--dataset-root", default="benchmarks/datasets/DanceTrack")
     detect.add_argument("--model-size", default="small", choices=["nano", "small", "medium", "large"])
     detect.add_argument("--threshold", type=float, default=0.25)
     detect.add_argument("--batch-size", type=int, default=8)
+    detect.add_argument("--detector", choices=["FRCNN", "DPM", "SDP", "all"], default="FRCNN")
+    detect.add_argument("--det-filename", default="det_rfdetr.txt")
+    detect.add_argument("--write-det-txt", action="store_true")
     detect.add_argument("--overwrite", action="store_true")
     detect.add_argument("--max-seqs", type=int, default=None)
     detect.set_defaults(func=cmd_detect)
 
     def add_track_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--benchmark",
+            choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+            default="DanceTrack",
+        )
         p.add_argument("--tracker", choices=["bytetrack", "ocsort", "mcbyte", "both", "all"], default="both")
         p.add_argument("--split", default="val")
         p.add_argument("--detection-source", choices=["gt", "det"], default="gt")
@@ -527,6 +637,11 @@ def build_parser() -> argparse.ArgumentParser:
     track.set_defaults(func=cmd_track)
 
     eval_p = subparsers.add_parser("eval", help="Run TrackEval for one tracker output folder.")
+    eval_p.add_argument(
+        "--benchmark",
+        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        default="DanceTrack",
+    )
     add_eval_args(eval_p)
     eval_p.add_argument("--tracker-name", required=True, help="Tracker folder name in TrackEval trackers root.")
     eval_p.set_defaults(func=cmd_eval)
@@ -538,14 +653,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     simple = subparsers.add_parser(
         "simple",
-        help="Minimal interface: pass only tracker + dataset (name or path), infer the rest.",
+        help="Minimal interface: pass tracker + dataset (name or path), infer benchmark/split and run full eval.",
     )
     simple.add_argument("tracker", choices=["bytetrack", "ocsort", "mcbyte", "both", "all"])
     simple.add_argument(
         "dataset",
         help=(
-            "Dataset name or path. Use 'dancetrack' for defaults, or pass a path to "
-            "DanceTrack root/split folder."
+            "Dataset name or path. Supported shortcuts: dancetrack, mot17, mot20, sportsmot, teamtrack. "
+            "You can also pass a path to a dataset root/split folder."
         ),
     )
     simple.add_argument(
@@ -556,6 +671,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     simple.add_argument("--trackeval-gt-root", default=str(_default_trackeval_gt_root()))
     simple.add_argument("--trackers-root", default=str(_default_trackers_root()))
+    simple.add_argument(
+        "--benchmark",
+        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        default=None,
+        help="Optional benchmark override. If omitted, inferred from dataset root name.",
+    )
     simple.add_argument("--bytetrack-name", default=None)
     simple.add_argument("--ocsort-name", default=None)
     simple.add_argument("--mcbyte-name", default=None)

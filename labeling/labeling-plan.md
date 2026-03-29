@@ -125,6 +125,45 @@ labeling/
   seqinfo.ini
 ```
 
+## Data Contract v1 (Operational Rules)
+
+- Canonical detector output for downstream tooling must exist at:
+  - `det/det.txt`
+- Optional detector audit output may also be written (recommended):
+  - `det/det_rfdetr.txt`
+- If both are written, keep them byte-identical for reproducibility.
+
+- Canonical benchmark naming for TrackEval integration:
+  - choose and freeze one benchmark label for internal data (for example `BasketballMOT`)
+  - TrackEval GT split folder format: `<benchmark>-<split>`
+  - Seqmap filename format: `<benchmark>-<split>.txt`
+  - Example:
+    - `.../gt/mot_challenge/BasketballMOT-train`
+    - `.../gt/mot_challenge/seqmaps/BasketballMOT-train.txt`
+
+- Sequence media normalization requirement:
+  - tracking/detection stages operate on numeric frame files in `img1/` (for example `000001.jpg`)
+  - if source arrives as `img1.mp4`, decode to `img1/*.jpg` before running detector/tracker
+  - keep `seqinfo.ini` aligned with decoded frame count and image geometry
+
+- File sanitation requirement (hard):
+  - ignore non-numeric frame stems when enumerating frames
+  - ignore/remove macOS metadata artifacts such as:
+    - `__MACOSX/`
+    - `._*`
+  - this prevents parse failures such as `int('._000001')`
+
+- GT-ready split policy:
+  - local TrackEval runs only on splits where each sequence has:
+    - `seqinfo.ini`
+    - `gt/gt.txt`
+  - prediction-only runs may still execute on non-public-GT splits (for example many `test` splits)
+
+- Evaluation caching policy:
+  - comparisons should reuse existing `pedestrian_summary.txt` when present
+  - only rerun tracker/eval when outputs are missing or explicitly forced
+  - this is required for practical iteration when slow trackers are included
+
 ## Detector-Assisted Pre-Label Pipeline
 
 - Design intent:

@@ -27,7 +27,13 @@ class DetectionRow:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run trackers ByteTrack/OCSORT on DanceTrack and export TrackEval-format results."
+        description="Run trackers ByteTrack/OCSORT/McByte on MOT-style datasets and export TrackEval-format results."
+    )
+    parser.add_argument(
+        "--benchmark",
+        default="DanceTrack",
+        choices=["DanceTrack", "MOT17", "MOT20", "SportsMOT", "TeamTrack"],
+        help="Benchmark name used for TrackEval folder/seqmap naming.",
     )
     parser.add_argument(
         "--tracker",
@@ -38,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split",
         default="val",
-        help="DanceTrack split to run (train, val, test).",
+        help="Dataset split to run (e.g. train/val/test depending on benchmark).",
     )
     parser.add_argument(
         "--detection-source",
@@ -49,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-root",
         default="benchmarks/datasets/DanceTrack",
-        help="Root path to DanceTrack dataset.",
+        help="Root path to dataset.",
     )
     parser.add_argument(
         "--trackeval-gt-root",
@@ -302,12 +308,20 @@ def _read_frame_or_blank(seq_root: Path, frame_idx: int, width: int, height: int
 
     candidate_exts = [".jpg", ".jpeg", ".png", ".webp", ".bmp"]
     img_dir = seq_root / "img1"
+    candidate_stems = [
+        f"{frame_idx:08d}",
+        f"{frame_idx:07d}",
+        f"{frame_idx:06d}",
+        f"{frame_idx:05d}",
+        str(frame_idx),
+    ]
     for ext in candidate_exts:
-        p = img_dir / f"{frame_idx:08d}{ext}"
-        if p.is_file():
-            frame = cv2.imread(str(p))
-            if frame is not None:
-                return frame
+        for stem in candidate_stems:
+            p = img_dir / f"{stem}{ext}"
+            if p.is_file():
+                frame = cv2.imread(str(p))
+                if frame is not None:
+                    return frame
     h = max(1, height)
     w = max(1, width)
     return np.zeros((h, w, 3), dtype=np.uint8)
@@ -351,6 +365,7 @@ def export_sequence_results_mcbyte(
 
 
 def run_tracker_over_split(
+    benchmark: str,
     tracker_name: str,
     tracker_folder_name: str,
     split: str,
@@ -360,7 +375,7 @@ def run_tracker_over_split(
     detection_source: str,
     min_det_score: float,
 ) -> None:
-    out_dir = trackers_root / f"DanceTrack-{split}" / tracker_folder_name / "data"
+    out_dir = trackers_root / f"{benchmark}-{split}" / tracker_folder_name / "data"
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Running {tracker_name} on split={split}, output={out_dir}")
 
@@ -468,7 +483,7 @@ def main() -> None:
     trackeval_gt_root = Path(args.trackeval_gt_root).resolve()
     trackers_root = Path(args.trackers_root).resolve()
 
-    seqmap = trackeval_gt_root / "seqmaps" / f"DanceTrack-{args.split}.txt"
+    seqmap = trackeval_gt_root / "seqmaps" / f"{args.benchmark}-{args.split}.txt"
     seqs = read_seqmap(seqmap)
 
     trackers_to_run: List[Tuple[str, str]]
@@ -494,6 +509,7 @@ def main() -> None:
 
     for tracker_name, out_name in trackers_to_run:
         run_tracker_over_split(
+            benchmark=args.benchmark,
             tracker_name=tracker_name,
             tracker_folder_name=out_name,
             split=args.split,

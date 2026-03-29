@@ -36,9 +36,15 @@ def _read_summary(summary_file: Path) -> Dict[str, str]:
     return dict(zip(headers, values))
 
 
-def _summary_file_for_tracker(trackers_root: Path, split: str, tracker: str, detection_source: str) -> Path:
+def _summary_file_for_tracker(
+    trackers_root: Path,
+    benchmark: str,
+    split: str,
+    tracker: str,
+    detection_source: str,
+) -> Path:
     tracker_output_name = rb._default_tracker_output_name(tracker, detection_source)
-    return trackers_root / f"DanceTrack-{split}" / tracker_output_name / "pedestrian_summary.txt"
+    return trackers_root / f"{benchmark}-{split}" / tracker_output_name / "pedestrian_summary.txt"
 
 
 def _best_trackers(metric: str, per_tracker: Dict[str, str]) -> str:
@@ -90,7 +96,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "dataset",
-        help="Dataset name or path (e.g. 'dancetrack' or a path to DanceTrack root/split).",
+        help=(
+            "Dataset name or path (e.g. 'dancetrack', 'mot17', 'mot20', "
+            "'sportsmot', 'teamtrack', or a dataset root/split path)."
+        ),
     )
     parser.add_argument(
         "--trackers",
@@ -122,14 +131,15 @@ def main() -> None:
     if not trackers:
         raise RuntimeError("No trackers provided.")
 
-    dataset_root, split = rb._resolve_dancetrack_root_and_split(dataset_path=args.dataset, split_override=None)
+    dataset_root, split = rb._resolve_dataset_root_and_split(dataset_path=args.dataset, split_override=None)
+    benchmark = rb._infer_benchmark_from_dataset_root(dataset_root)
     gt_root = rb._default_trackeval_gt_root()
     trackers_root = rb._default_trackers_root()
-    seqs = rb._read_seqs(gt_root / "seqmaps" / f"DanceTrack-{split}.txt")
+    seqs = rb._read_seqs(gt_root / "seqmaps" / f"{benchmark}-{split}.txt")
     detection_source = rb._infer_detection_source(dataset_root=dataset_root, split=split, seqs=seqs)
 
     print(
-        f"[INFO] Compare config: dataset_root={dataset_root} split={split} "
+        f"[INFO] Compare config: benchmark={benchmark} dataset_root={dataset_root} split={split} "
         f"detection_source={detection_source} trackers={','.join(trackers)}"
     )
 
@@ -137,6 +147,7 @@ def main() -> None:
         for tracker in trackers:
             summary_file = _summary_file_for_tracker(
                 trackers_root=trackers_root,
+                benchmark=benchmark,
                 split=split,
                 tracker=tracker,
                 detection_source=detection_source,
@@ -147,8 +158,11 @@ def main() -> None:
             cmd = [
                 args.python,
                 str(Path(__file__).resolve().parent / "run_benchmark.py"),
+                "simple",
                 tracker,
                 args.dataset,
+                "--benchmark",
+                benchmark,
             ]
             _run(cmd)
 
@@ -156,6 +170,7 @@ def main() -> None:
     for tracker in trackers:
         summary_file = _summary_file_for_tracker(
             trackers_root=trackers_root,
+            benchmark=benchmark,
             split=split,
             tracker=tracker,
             detection_source=detection_source,
