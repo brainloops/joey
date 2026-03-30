@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 import configparser
 import json
+import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,7 +60,9 @@ class SequenceInfo:
     img_dir: Path
     det_file: Path
     gt_file: Path
-    state_file: Path
+    legacy_state_file: Path
+    absent_file: Path
+    session_file: Path
     seq_len: int
     width: int
     height: int
@@ -87,6 +91,18 @@ def _bbox_iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float
     return inter / union if union > 0 else 0.0
 
 
+def _bbox_intersects(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> bool:
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    return (ix2 - ix1) > 0.0 and (iy2 - iy1) > 0.0
+
+
 def _get_screen_size() -> Tuple[int, int]:
     """Best-effort monitor size query with sane fallback."""
     try:
@@ -104,6 +120,20 @@ def _get_screen_size() -> Tuple[int, int]:
     return 1920, 1080
 
 
+def _atomic_write_text(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    if path.exists():
+        bak_path = path.with_name(path.name + ".bak")
+        shutil.copy2(path, bak_path)
+    tmp_path.write_text(payload, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    _atomic_write_text(path, json.dumps(obj, indent=2))
+
+
 def discover_sequences(dataset_root: Path, split: str) -> List[SequenceInfo]:
     split_root = dataset_root / split
     if not split_root.is_dir():
@@ -114,7 +144,9 @@ def discover_sequences(dataset_root: Path, split: str) -> List[SequenceInfo]:
         img_dir = seq_root / "img1"
         det_file = seq_root / "det" / "det.txt"
         gt_file = seq_root / "gt" / "gt.txt"
-        state_file = seq_root / "gt" / "labeler_state.json"
+        legacy_state_file = seq_root / "gt" / "labeler_state.json"
+        absent_file = seq_root / "gt" / "absent_frames.json"
+        session_file = seq_root / "gt" / "session_state.json"
         seqinfo_file = seq_root / "seqinfo.ini"
         if not (img_dir.is_dir() and det_file.is_file() and seqinfo_file.is_file()):
             continue
@@ -128,7 +160,9 @@ def discover_sequences(dataset_root: Path, split: str) -> List[SequenceInfo]:
                 img_dir=img_dir,
                 det_file=det_file,
                 gt_file=gt_file,
-                state_file=state_file,
+                legacy_state_file=legacy_state_file,
+                absent_file=absent_file,
+                session_file=session_file,
                 seq_len=int(seq_cfg.get("seqLength", "0")),
                 width=int(seq_cfg.get("imWidth", "0")),
                 height=int(seq_cfg.get("imHeight", "0")),
@@ -183,6 +217,7 @@ class BasketballMOTLabelerApp:
 
         self.detections_by_frame: Dict[int, List[Detection]] = {}
         self.assignments_by_track: Dict[int, Dict[int, Assignment]] = {}
+        self.absent_frames_by_track: Dict[int, set[int]] = {}
         self.assigned_det_keys: set[Tuple[int, int]] = set()
         self.last_assigned_box_by_track: Dict[int, Tuple[float, float, float, float]] = {}
         self.undo_stack: List[Tuple[str, Any]] = []
@@ -192,6 +227,10 @@ class BasketballMOTLabelerApp:
         self.cycle_last_point_img: Optional[Tuple[float, float]] = None
         self.cycle_last_signature: Optional[Tuple[Tuple[int, int], ...]] = None
         self.cycle_step = 0
+        self.playback_track_id: Optional[int] = None
+        self.playback_active = False
+        self.playback_fps = 30.0
+        self.playback_last_ts = 0.0
 
         self.texture_tag = "bmot_texture"
         self.image_tag = "bmot_image"
@@ -200,6 +239,10 @@ class BasketballMOTLabelerApp:
         self.track_tag = "bmot_active_track"
         self.frame_slider_tag = "bmot_frame_slider"
         self.frame_input_tag = "bmot_frame_input"
+        self.unreviewed_only_tag = "bmot_unreviewed_only"
+        self.playback_loop_tag = "bmot_playback_loop"
+        self.playback_button_tag = "bmot_playback_button"
+        self.spotlight_tag = "bmot_spotlight"
         self.seq_combo_tag = "bmot_seq_combo"
         self.track_table_tag = "bmot_track_table"
         self.persist_tag = "bmot_persist_text"
@@ -218,9 +261,10 @@ class BasketballMOTLabelerApp:
         self.window_h = 980
         self.window_padding_w = 40
         self.window_controls_h = 220
-        self.side_panel_w = 360
+        self.side_panel_w = 540
         self.main_gap_w = 14
         self.left_pane_w = 1100
+        self.frame_status_drawlist_tag = "bmot_frame_status_drawlist"
 
         self._load_sequence(self.current_seq.name)
 
@@ -242,12 +286,15 @@ class BasketballMOTLabelerApp:
         self.active_track_id = track_id
         if self.ui_ready and dpg.does_item_exist(self.track_tag):
             dpg.set_value(self.track_tag, f"Active track: {track_id if track_id is not None else 'None'}")
+        self._update_playback_controls()
         self._update_persist_text()
 
     def _load_sequence(self, seq_name: str) -> None:
+        self._stop_playback()
         self.current_seq = self.sequence_by_name[seq_name]
         self.current_frame = 1
         self.assignments_by_track = {}
+        self.absent_frames_by_track = {}
         self.assigned_det_keys = set()
         self.last_assigned_box_by_track = {}
         self.undo_stack = []
@@ -272,65 +319,160 @@ class BasketballMOTLabelerApp:
         self._update_persist_text()
 
     def _load_existing_labels(self) -> None:
-        if self.current_seq.state_file.exists():
-            self._load_from_state_file()
-        else:
-            self._load_from_gt_file()
+        self._load_from_gt_file()
+        loaded_absent = self._load_absent_file()
+        loaded_session = self._load_session_file()
+        # Legacy migration path: previous monolithic state file.
+        migrated_from_legacy = False
+        if not loaded_absent and not loaded_session and self.current_seq.legacy_state_file.exists():
+            migrated_from_legacy = self._load_from_legacy_state_file()
+        self._apply_resume_fallback()
+        if migrated_from_legacy:
+            # Write split files immediately once migrated from legacy state.
+            self._persist_progress(silent=True)
 
-    def _load_from_state_file(self) -> None:
-        try:
-            payload = json.loads(self.current_seq.state_file.read_text(encoding="utf-8"))
-        except Exception:
-            self._load_from_gt_file()
+    def _known_track_ids(self) -> set[int]:
+        return set(self.assignments_by_track.keys()) | set(self.absent_frames_by_track.keys())
+
+    def _apply_resume_fallback(self) -> None:
+        if self.active_track_id is not None:
             return
-        rows = payload.get("assignments", [])
-        if not isinstance(rows, list):
-            rows = []
-        self.next_track_id = int(payload.get("next_track_id", self.track_id_start))
-        if self.next_track_id < self.track_id_start:
-            self.next_track_id = self.track_id_start
-        for item in rows:
-            if not isinstance(item, dict):
+        if self.assignments_by_track:
+            latest_tid = max(
+                self.assignments_by_track.keys(),
+                key=lambda tid: max(self.assignments_by_track[tid].keys()),
+            )
+            self.active_track_id = latest_tid
+            self.focus_mode = False
+            self.skip_mode = False
+            return
+        if self.absent_frames_by_track:
+            latest_tid = max(
+                self.absent_frames_by_track.keys(),
+                key=lambda tid: max(self.absent_frames_by_track[tid]) if self.absent_frames_by_track[tid] else -1,
+            )
+            self.active_track_id = latest_tid
+            self.focus_mode = False
+            self.skip_mode = True
+            return
+        self.focus_mode = False
+        self.skip_mode = False
+
+    def _load_absent_file(self) -> bool:
+        if not self.current_seq.absent_file.exists():
+            return False
+        try:
+            payload = json.loads(self.current_seq.absent_file.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        absent_payload = payload.get("absent_frames", payload if isinstance(payload, dict) else {})
+        if not isinstance(absent_payload, dict):
+            return False
+        loaded_any = False
+        for k, frames in absent_payload.items():
+            try:
+                tid = int(k)
+            except Exception:
                 continue
-            frame = int(item.get("frame", 0))
-            track_id = int(item.get("track_id", 0))
-            x = float(item.get("x", 0.0))
-            y = float(item.get("y", 0.0))
-            w = float(item.get("w", 0.0))
-            h = float(item.get("h", 0.0))
-            if frame < 1 or track_id < self.track_id_start or w <= 0 or h <= 0:
+            if tid < self.track_id_start or not isinstance(frames, list):
                 continue
-            det_key_raw = item.get("det_key")
-            det_key: Optional[Tuple[int, int]] = None
-            if isinstance(det_key_raw, list) and len(det_key_raw) == 2:
-                det_key = (int(det_key_raw[0]), int(det_key_raw[1]))
-            asn = Assignment(track_id=track_id, frame=frame, x=x, y=y, w=w, h=h, det_key=det_key)
-            self.assignments_by_track.setdefault(track_id, {})[frame] = asn
-            if det_key is not None:
-                self.assigned_det_keys.add(det_key)
-            self.last_assigned_box_by_track[track_id] = (x, y, w, h)
-            self.next_track_id = max(self.next_track_id, track_id + 1)
+            norm: set[int] = set()
+            for f in frames:
+                try:
+                    fi = int(f)
+                except Exception:
+                    continue
+                if 1 <= fi <= self.current_seq.seq_len:
+                    norm.add(fi)
+            if norm:
+                self.absent_frames_by_track[tid] = norm
+                self.next_track_id = max(self.next_track_id, tid + 1)
+                loaded_any = True
+        return loaded_any
+
+    def _load_session_file(self) -> bool:
+        if not self.current_seq.session_file.exists():
+            return False
+        try:
+            payload = json.loads(self.current_seq.session_file.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        self.next_track_id = max(
+            self.next_track_id,
+            int(payload.get("next_track_id", self.track_id_start)),
+        )
         saved_frame = int(payload.get("current_frame", 1))
         self.current_frame = _clamp(saved_frame, 1, max(1, self.current_seq.seq_len))
         saved_active_track = payload.get("active_track_id")
+        known_ids = self._known_track_ids()
         if isinstance(saved_active_track, int) and saved_active_track >= self.track_id_start:
-            if saved_active_track in self.assignments_by_track or saved_active_track < self.next_track_id:
+            if saved_active_track in known_ids or saved_active_track < self.next_track_id:
                 self.active_track_id = saved_active_track
         self.focus_mode = bool(payload.get("focus_mode", False))
         self.skip_mode = bool(payload.get("skip_mode", False))
-        if self.active_track_id is None:
-            if self.assignments_by_track:
-                # Sensible resume fallback: continue the track with latest labeled frame.
-                latest_tid = max(
-                    self.assignments_by_track.keys(),
-                    key=lambda tid: max(self.assignments_by_track[tid].keys()),
-                )
-                self.active_track_id = latest_tid
-                self.focus_mode = False
-                self.skip_mode = False
-            else:
-                self.focus_mode = False
-                self.skip_mode = False
+        return True
+
+    def _load_from_legacy_state_file(self) -> bool:
+        try:
+            payload = json.loads(self.current_seq.legacy_state_file.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        # Restore positives from legacy only if gt is empty/missing.
+        if not self.assignments_by_track:
+            rows = payload.get("assignments", [])
+            if isinstance(rows, list):
+                for item in rows:
+                    if not isinstance(item, dict):
+                        continue
+                    frame = int(item.get("frame", 0))
+                    track_id = int(item.get("track_id", 0))
+                    x = float(item.get("x", 0.0))
+                    y = float(item.get("y", 0.0))
+                    w = float(item.get("w", 0.0))
+                    h = float(item.get("h", 0.0))
+                    if frame < 1 or track_id < self.track_id_start or w <= 0 or h <= 0:
+                        continue
+                    det_key_raw = item.get("det_key")
+                    det_key: Optional[Tuple[int, int]] = None
+                    if isinstance(det_key_raw, list) and len(det_key_raw) == 2:
+                        det_key = (int(det_key_raw[0]), int(det_key_raw[1]))
+                    asn = Assignment(track_id=track_id, frame=frame, x=x, y=y, w=w, h=h, det_key=det_key)
+                    self.assignments_by_track.setdefault(track_id, {})[frame] = asn
+                    if det_key is not None:
+                        self.assigned_det_keys.add(det_key)
+                    self.last_assigned_box_by_track[track_id] = (x, y, w, h)
+                    self.next_track_id = max(self.next_track_id, track_id + 1)
+        # Load legacy absent/session fields.
+        absent_payload = payload.get("absent_frames", {})
+        if isinstance(absent_payload, dict):
+            for k, frames in absent_payload.items():
+                try:
+                    tid = int(k)
+                except Exception:
+                    continue
+                if tid < self.track_id_start or not isinstance(frames, list):
+                    continue
+                norm: set[int] = set()
+                for f in frames:
+                    try:
+                        fi = int(f)
+                    except Exception:
+                        continue
+                    if 1 <= fi <= self.current_seq.seq_len:
+                        norm.add(fi)
+                if norm:
+                    self.absent_frames_by_track[tid] = norm
+                    self.next_track_id = max(self.next_track_id, tid + 1)
+        self.next_track_id = max(self.next_track_id, int(payload.get("next_track_id", self.track_id_start)))
+        self.current_frame = _clamp(int(payload.get("current_frame", 1)), 1, max(1, self.current_seq.seq_len))
+        saved_active_track = payload.get("active_track_id")
+        known_ids = self._known_track_ids()
+        if isinstance(saved_active_track, int) and saved_active_track >= self.track_id_start:
+            if saved_active_track in known_ids or saved_active_track < self.next_track_id:
+                self.active_track_id = saved_active_track
+        self.focus_mode = bool(payload.get("focus_mode", False))
+        self.skip_mode = bool(payload.get("skip_mode", False))
+        return True
 
     def _load_from_gt_file(self) -> None:
         if not self.current_seq.gt_file.exists():
@@ -410,9 +552,35 @@ class BasketballMOTLabelerApp:
     def _sync_frame_controls(self) -> None:
         if not self.ui_ready:
             return
-        dpg.configure_item(self.frame_slider_tag, min_value=1, max_value=max(1, self.current_seq.seq_len))
-        dpg.set_value(self.frame_slider_tag, self.current_frame)
-        dpg.set_value(self.frame_input_tag, self.current_frame)
+        unreviewed_only = dpg.does_item_exist(self.unreviewed_only_tag) and bool(dpg.get_value(self.unreviewed_only_tag))
+        frames = self._unreviewed_frames_for_active_track() if unreviewed_only else []
+        if frames:
+            dpg.configure_item(self.frame_slider_tag, min_value=1, max_value=len(frames))
+            if self.current_frame in frames:
+                slider_value = frames.index(self.current_frame) + 1
+            else:
+                # Keep slider in a reasonable nearest position when current frame is reviewed.
+                nearest_idx = min(range(len(frames)), key=lambda i: abs(frames[i] - self.current_frame))
+                slider_value = nearest_idx + 1
+            dpg.set_value(self.frame_slider_tag, slider_value)
+            dpg.set_value(self.frame_input_tag, slider_value)
+        else:
+            dpg.configure_item(self.frame_slider_tag, min_value=1, max_value=max(1, self.current_seq.seq_len))
+            dpg.set_value(self.frame_slider_tag, self.current_frame)
+            dpg.set_value(self.frame_input_tag, self.current_frame)
+
+    def _is_frame_reviewed_for_track(self, track_id: int, frame: int) -> bool:
+        if frame in self.assignments_by_track.get(track_id, {}):
+            return True
+        if frame in self.absent_frames_by_track.get(track_id, set()):
+            return True
+        return False
+
+    def _unreviewed_frames_for_active_track(self) -> List[int]:
+        if self.active_track_id is None:
+            return []
+        tid = self.active_track_id
+        return [f for f in range(1, self.current_seq.seq_len + 1) if not self._is_frame_reviewed_for_track(tid, f)]
 
     def _frame_assignments(self, frame: int) -> Dict[int, Assignment]:
         out: Dict[int, Assignment] = {}
@@ -432,12 +600,28 @@ class BasketballMOTLabelerApp:
             return active_asn.det_key
         if self.active_track_id is None or self.skip_mode:
             return None
+        if frame in self.absent_frames_by_track.get(self.active_track_id, set()):
+            return None
         if self.active_track_id not in self.last_assigned_box_by_track:
             return None
         suggested = self._best_iou_detection(frame=frame, ref_box=self.last_assigned_box_by_track[self.active_track_id])
         if suggested is None:
             return None
         return (suggested.frame, suggested.det_idx)
+
+    def _predicted_detection_for_frame(self, frame: int) -> Optional[Detection]:
+        if self.active_track_id is None:
+            return None
+        if self.skip_mode:
+            return None
+        if frame in self.absent_frames_by_track.get(self.active_track_id, set()):
+            return None
+        if self._active_assignment(frame) is not None:
+            return None
+        ref_box = self.last_assigned_box_by_track.get(self.active_track_id)
+        if ref_box is None:
+            return None
+        return self._best_iou_detection(frame=frame, ref_box=ref_box)
 
     def _candidate_detections(self, frame: int) -> List[Detection]:
         active_asn = self._active_assignment(frame)
@@ -506,20 +690,71 @@ class BasketballMOTLabelerApp:
         base_thickness = 4
         active_thickness = 6
         active_asn = self._active_assignment(self.current_frame)
-        active_key = self._active_det_key_for_frame(self.current_frame)
+        predicted_det = self._predicted_detection_for_frame(self.current_frame)
+        predicted_overlap_colors = [
+            (255, 205, 135, 255),  # light orange
+            (215, 170, 255, 255),  # light purple
+            (155, 220, 255, 255),  # light blue
+            (255, 170, 220, 255),  # light pink
+        ]
+        active_key = (
+            active_asn.det_key
+            if (active_asn is not None and active_asn.det_key is not None)
+            else ((predicted_det.frame, predicted_det.det_idx) if predicted_det is not None else None)
+        )
+        active_is_locked = active_asn is not None and active_asn.det_key is not None
         self.active_box_img = None
+        active_rect_px: Optional[Tuple[float, float, float, float]] = None
+        overlap_color_by_key: Dict[Tuple[int, int], Tuple[int, int, int, int]] = {}
+        if predicted_det is not None:
+            pred_box = (predicted_det.x, predicted_det.y, predicted_det.w, predicted_det.h)
+            overlaps: List[Tuple[int, int]] = []
+            for det in self._candidate_detections(self.current_frame):
+                key = (det.frame, det.det_idx)
+                if key == active_key:
+                    continue
+                if _bbox_intersects(pred_box, (det.x, det.y, det.w, det.h)):
+                    overlaps.append(key)
+            overlaps.sort()
+            for i, key in enumerate(overlaps):
+                overlap_color_by_key[key] = predicted_overlap_colors[i % len(predicted_overlap_colors)]
+
+        spotlight_on = self.ui_ready and dpg.does_item_exist(self.spotlight_tag) and bool(dpg.get_value(self.spotlight_tag))
+        if spotlight_on and active_asn is not None:
+            sx1 = active_asn.x * self.scale_x
+            sy1 = active_asn.y * self.scale_y
+            sx2 = (active_asn.x + active_asn.w) * self.scale_x
+            sy2 = (active_asn.y + active_asn.h) * self.scale_y
+            sx1 = max(0.0, min(float(self.display_w), sx1))
+            sy1 = max(0.0, min(float(self.display_h), sy1))
+            sx2 = max(0.0, min(float(self.display_w), sx2))
+            sy2 = max(0.0, min(float(self.display_h), sy2))
+            if sx2 > sx1 and sy2 > sy1:
+                active_rect_px = (sx1, sy1, sx2, sy2)
+                mask_fill = (90, 90, 90, 120)
+                # Dim everything outside active labeled box.
+                dpg.draw_rectangle((0, 0), (self.display_w, sy1), color=(0, 0, 0, 0), fill=mask_fill, parent=self.canvas_tag)
+                dpg.draw_rectangle((0, sy2), (self.display_w, self.display_h), color=(0, 0, 0, 0), fill=mask_fill, parent=self.canvas_tag)
+                dpg.draw_rectangle((0, sy1), (sx1, sy2), color=(0, 0, 0, 0), fill=mask_fill, parent=self.canvas_tag)
+                dpg.draw_rectangle((sx2, sy1), (self.display_w, sy2), color=(0, 0, 0, 0), fill=mask_fill, parent=self.canvas_tag)
 
         candidates = self._candidate_detections(self.current_frame)
         for det in candidates:
             key = (det.frame, det.det_idx)
-            if self.focus_mode and self.active_track_id is not None and key != active_key:
+            if self.playback_active and (self.active_track_id is None or key != active_key):
                 continue
             x1 = det.x * self.scale_x
             y1 = det.y * self.scale_y
             x2 = (det.x + det.w) * self.scale_x
             y2 = (det.y + det.h) * self.scale_y
             is_active = self.active_track_id is not None and key == active_key
-            color = (40, 220, 60, 255) if is_active else (210, 210, 210, 230)
+            if is_active:
+                # Dark green = locked/confirmed, light green = predicted.
+                color = (0, 150, 0, 255) if active_is_locked else (130, 255, 130, 255)
+            elif key in overlap_color_by_key:
+                color = overlap_color_by_key[key]
+            else:
+                color = (210, 210, 210, 230)
             thickness = active_thickness if is_active else base_thickness
             dpg.draw_rectangle((x1, y1), (x2, y2), color=color, thickness=thickness, parent=self.canvas_tag)
             if is_active:
@@ -530,7 +765,17 @@ class BasketballMOTLabelerApp:
         if active_asn is not None and self.active_track_id is not None:
             label_x = active_asn.x * self.scale_x + 3
             label_y = max(0, active_asn.y * self.scale_y - 18)
-            dpg.draw_text((label_x, label_y), f"T{self.active_track_id}", color=(40, 220, 60, 255), size=16, parent=self.canvas_tag)
+            dpg.draw_text((label_x, label_y), f"T{self.active_track_id}", color=(0, 150, 0, 255), size=16, parent=self.canvas_tag)
+        elif predicted_det is not None and self.active_track_id is not None:
+            label_x = predicted_det.x * self.scale_x + 3
+            label_y = max(0, predicted_det.y * self.scale_y - 18)
+            dpg.draw_text(
+                (label_x, label_y),
+                f"T{self.active_track_id} (pred)",
+                color=(130, 255, 130, 255),
+                size=16,
+                parent=self.canvas_tag,
+            )
 
         assigned_count = len(self.assigned_det_keys)
         all_count = sum(len(v) for v in self.detections_by_frame.values())
@@ -540,9 +785,25 @@ class BasketballMOTLabelerApp:
             f"assigned={assigned_count}/{all_count}"
         )
         self._refresh_track_table()
+        self._render_frame_status_badge()
 
     def _step_frame(self, delta: int) -> None:
-        self.current_frame = _clamp(self.current_frame + delta, 1, max(1, self.current_seq.seq_len))
+        unreviewed_only = self.ui_ready and dpg.does_item_exist(self.unreviewed_only_tag) and bool(
+            dpg.get_value(self.unreviewed_only_tag)
+        )
+        if unreviewed_only:
+            frames = self._unreviewed_frames_for_active_track()
+            if frames:
+                if delta >= 0:
+                    nxt = next((f for f in frames if f > self.current_frame), None)
+                    self.current_frame = nxt if nxt is not None else frames[-1]
+                else:
+                    prev = next((f for f in reversed(frames) if f < self.current_frame), None)
+                    self.current_frame = prev if prev is not None else frames[0]
+            else:
+                self.current_frame = _clamp(self.current_frame + delta, 1, max(1, self.current_seq.seq_len))
+        else:
+            self.current_frame = _clamp(self.current_frame + delta, 1, max(1, self.current_seq.seq_len))
         self._sync_frame_controls()
         self._render_frame()
         self._persist_session_state()
@@ -554,15 +815,24 @@ class BasketballMOTLabelerApp:
         self._persist_session_state()
 
     def _first_available_track_id(self) -> int:
-        used = set(self.assignments_by_track.keys())
+        used = set(self.assignments_by_track.keys()) | set(self.absent_frames_by_track.keys())
+        if self.active_track_id is not None:
+            used.add(self.active_track_id)
         tid = self.track_id_start
         while tid in used:
             tid += 1
         return tid
 
+    def _next_monotonic_track_id(self) -> int:
+        known = self._known_track_ids()
+        if self.active_track_id is not None:
+            known.add(self.active_track_id)
+        min_from_known = (max(known) + 1) if known else self.track_id_start
+        return max(self.track_id_start, int(self.next_track_id), min_from_known)
+
     def _current_track_id_for_assignment(self) -> int:
         if self.active_track_id is None:
-            tid = self._first_available_track_id()
+            tid = self._next_monotonic_track_id()
             self.next_track_id = max(self.next_track_id, tid + 1)
             self._set_active_track(tid)
             self._persist_session_state()
@@ -574,6 +844,8 @@ class BasketballMOTLabelerApp:
         if key in self.assigned_det_keys and key != (self._active_assignment(det.frame).det_key if self._active_assignment(det.frame) else None):
             return
         tid = self._current_track_id_for_assignment()
+        if tid in self.absent_frames_by_track and det.frame in self.absent_frames_by_track[tid]:
+            self.absent_frames_by_track[tid].discard(det.frame)
         prev = self.assignments_by_track.get(tid, {}).get(det.frame)
         if prev is not None and prev.det_key is not None and prev.det_key in self.assigned_det_keys:
             self.assigned_det_keys.remove(prev.det_key)
@@ -602,6 +874,74 @@ class BasketballMOTLabelerApp:
         self._reset_click_cycle()
         self._render_frame()
         self._persist_progress(silent=True)
+
+    def _delete_active_frame_assignment(self) -> None:
+        if self.active_track_id is None:
+            self._log_status("No active track selected.")
+            return
+        self.absent_frames_by_track.setdefault(self.active_track_id, set()).add(self.current_frame)
+        rows = self.assignments_by_track.get(self.active_track_id, {})
+        asn = rows.get(self.current_frame)
+        removed = False
+        if asn is not None:
+            del rows[self.current_frame]
+            if asn.det_key is not None and asn.det_key in self.assigned_det_keys:
+                self.assigned_det_keys.remove(asn.det_key)
+            removed = True
+        self.focus_mode = False
+        self.skip_mode = True
+        self._reset_click_cycle()
+        self._render_frame()
+        self._persist_progress(silent=True)
+        if removed:
+            self._log_status(f"Removed assignment for track {self.active_track_id} on frame {self.current_frame}.")
+        else:
+            self._log_status(
+                f"No explicit assignment on frame {self.current_frame}; switched to skip mode for track {self.active_track_id}."
+            )
+
+    def _mark_absent_current_frame(self) -> None:
+        if self.active_track_id is None:
+            return
+        # Do not overwrite explicit positive assignment with absent label.
+        if self._active_assignment(self.current_frame) is not None:
+            return
+        self.absent_frames_by_track.setdefault(self.active_track_id, set()).add(self.current_frame)
+
+    def _confirm_current_frame(self, emit_missing_msg: bool = True) -> bool:
+        """Lock in current frame selection for active track. Returns True if saved."""
+        if self.active_track_id is None:
+            self._log_status("No active track selected.")
+            return False
+        if self._active_assignment(self.current_frame) is not None:
+            # Already confirmed on this frame.
+            self.absent_frames_by_track.setdefault(self.active_track_id, set()).discard(self.current_frame)
+            self.focus_mode = True
+            self.skip_mode = False
+            self._render_frame()
+            self._persist_session_state()
+            return True
+        predicted = self._predicted_detection_for_frame(self.current_frame)
+        if predicted is None:
+            if emit_missing_msg:
+                self._log_status(f"No predicted box to save on frame {self.current_frame}.")
+            return False
+        self._assign_detection(predicted)
+        return True
+
+    def _save_or_mark_absent_current_frame(self) -> None:
+        if self.active_track_id is None:
+            self._log_status("No active track selected.")
+            return
+        saved = self._confirm_current_frame(emit_missing_msg=False)
+        if saved:
+            return
+        self._mark_absent_current_frame()
+        self.focus_mode = False
+        self.skip_mode = True
+        self._render_frame()
+        self._persist_progress(silent=True)
+        self._log_status(f"Marked frame {self.current_frame} absent for track {self.active_track_id}.")
 
     def _pick_detection_at_mouse(self, mouse_x: float, mouse_y: float) -> Optional[Detection]:
         dx = mouse_x / self.scale_x
@@ -648,27 +988,21 @@ class BasketballMOTLabelerApp:
             for r in rows
         ]
         payload = "\n".join(out_lines) + ("\n" if out_lines else "")
-        self.current_seq.gt_file.parent.mkdir(parents=True, exist_ok=True)
-        self.current_seq.gt_file.write_text(payload, encoding="utf-8")
+        _atomic_write_text(self.current_seq.gt_file, payload)
         if not silent:
             self._log_status(f"Saved {len(rows)} GT rows: {self.current_seq.gt_file}")
 
-    def _save_state(self, silent: bool = False) -> None:
-        rows: List[dict[str, Any]] = []
-        for tid in sorted(self.assignments_by_track):
-            for frame in sorted(self.assignments_by_track[tid]):
-                asn = self.assignments_by_track[tid][frame]
-                rows.append(
-                    {
-                        "track_id": tid,
-                        "frame": asn.frame,
-                        "x": asn.x,
-                        "y": asn.y,
-                        "w": asn.w,
-                        "h": asn.h,
-                        "det_key": [asn.det_key[0], asn.det_key[1]] if asn.det_key is not None else None,
-                    }
-                )
+    def _save_absent_frames(self, silent: bool = False) -> None:
+        payload = {
+            "version": 1,
+            "track_id_start": self.track_id_start,
+            "absent_frames": {str(tid): sorted(list(frames)) for tid, frames in self.absent_frames_by_track.items()},
+        }
+        _atomic_write_json(self.current_seq.absent_file, payload)
+        if not silent:
+            self._log_status(f"Saved absent-frame state: {self.current_seq.absent_file}")
+
+    def _save_session_state(self, silent: bool = False) -> None:
         payload = {
             "version": 1,
             "track_id_start": self.track_id_start,
@@ -677,41 +1011,116 @@ class BasketballMOTLabelerApp:
             "active_track_id": self.active_track_id,
             "focus_mode": self.focus_mode,
             "skip_mode": self.skip_mode,
-            "assignments": rows,
         }
-        self.current_seq.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.current_seq.state_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _atomic_write_json(self.current_seq.session_file, payload)
         if not silent:
-            self._log_status(f"Saved labeler state: {self.current_seq.state_file}")
+            self._log_status(f"Saved session state: {self.current_seq.session_file}")
 
     def _persist_progress(self, silent: bool = True) -> None:
         self._save_gt(silent=silent)
-        self._save_state(silent=silent)
+        self._save_absent_frames(silent=silent)
+        self._save_session_state(silent=silent)
         self._update_persist_text()
 
     def _persist_session_state(self) -> None:
-        self._save_state(silent=True)
+        self._save_session_state(silent=True)
         self._update_persist_text()
 
     def _refresh_track_table(self) -> None:
         if not self.ui_ready or not dpg.does_item_exist(self.track_table_tag):
             return
         dpg.delete_item(self.track_table_tag, children_only=True, slot=1)
-        track_ids = sorted(self.assignments_by_track.keys())
+        track_ids = sorted(set(self.assignments_by_track.keys()) | set(self.absent_frames_by_track.keys()))
         for tid in track_ids:
             count = len(self.assignments_by_track.get(tid, {}))
+            absent = len(self.absent_frames_by_track.get(tid, set()))
+            reviewed = count + absent
+            pct = (100.0 * reviewed / max(1, self.current_seq.seq_len))
             active = "*" if self.active_track_id == tid else ""
             with dpg.table_row(parent=self.track_table_tag):
-                dpg.add_text(str(tid))
+                if self.active_track_id == tid:
+                    dpg.add_text(str(tid), color=(40, 220, 60, 255))
+                else:
+                    dpg.add_text(str(tid))
                 dpg.add_text(str(count))
+                dpg.add_text(f"{reviewed}/{self.current_seq.seq_len}")
+                dpg.add_text(f"{pct:.1f}%")
                 dpg.add_text(active)
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="Use", callback=self.cb_use_track_row, user_data=tid, width=54)
                     dpg.add_button(label="Del", callback=self.cb_delete_track_row, user_data=tid, width=54)
 
-    def _use_track(self, track_id: int) -> None:
-        if track_id not in self.assignments_by_track:
+    def _start_track_playback(self, track_id: int) -> None:
+        if track_id not in self.assignments_by_track and track_id not in self.absent_frames_by_track:
             return
+        self.playback_track_id = track_id
+        self.playback_active = True
+        self.playback_last_ts = time.perf_counter()
+        self._set_active_track(track_id)
+        self.focus_mode = False
+        self.skip_mode = False
+        self.current_frame = 1
+        self._sync_frame_controls()
+        self._render_frame()
+        self._update_playback_controls()
+        self._refresh_track_table()
+
+    def _stop_playback(self) -> None:
+        self.playback_active = False
+        self.playback_track_id = None
+        self._update_playback_controls()
+
+    def _tick_playback(self) -> None:
+        if not self.playback_active:
+            return
+        if self.playback_track_id is None:
+            self._stop_playback()
+            return
+        interval = 1.0 / max(1e-6, self.playback_fps)
+        now = time.perf_counter()
+        elapsed = now - self.playback_last_ts
+        if elapsed < interval:
+            return
+        steps = int(elapsed / interval)
+        self.playback_last_ts += steps * interval
+        advanced = False
+        for _ in range(steps):
+            if self.current_frame >= self.current_seq.seq_len:
+                loop_enabled = self.ui_ready and dpg.does_item_exist(self.playback_loop_tag) and bool(
+                    dpg.get_value(self.playback_loop_tag)
+                )
+                if loop_enabled:
+                    self.current_frame = 1
+                    advanced = True
+                    continue
+                self._stop_playback()
+                break
+            self.current_frame += 1
+            advanced = True
+        if advanced:
+            self._sync_frame_controls()
+            self._render_frame()
+            self._refresh_track_table()
+
+    def _toggle_playback_active_track(self) -> None:
+        if self.playback_active:
+            self._stop_playback()
+            return
+        if self.active_track_id is None:
+            self._log_status("Select/Use a track first, then press Play track.")
+            return
+        self._start_track_playback(self.active_track_id)
+
+    def _update_playback_controls(self) -> None:
+        if not self.ui_ready or not dpg.does_item_exist(self.playback_button_tag):
+            return
+        label = "Stop track" if self.playback_active else "Play track"
+        dpg.configure_item(self.playback_button_tag, label=label)
+
+    def _use_track(self, track_id: int) -> None:
+        if track_id not in self.assignments_by_track and track_id not in self.absent_frames_by_track:
+            return
+        self._stop_playback()
         self._set_active_track(track_id)
         self.focus_mode = False
         self.skip_mode = False
@@ -719,9 +1128,12 @@ class BasketballMOTLabelerApp:
         self._persist_session_state()
 
     def _delete_track(self, track_id: int) -> None:
-        if track_id not in self.assignments_by_track:
+        if track_id not in self.assignments_by_track and track_id not in self.absent_frames_by_track:
             return
+        if self.playback_track_id == track_id:
+            self._stop_playback()
         rows = self.assignments_by_track.pop(track_id, {})
+        self.absent_frames_by_track.pop(track_id, None)
         for asn in rows.values():
             if asn.det_key is not None and asn.det_key in self.assigned_det_keys:
                 self.assigned_det_keys.remove(asn.det_key)
@@ -731,7 +1143,7 @@ class BasketballMOTLabelerApp:
             self._set_active_track(None)
             self.focus_mode = False
             self.skip_mode = False
-        self.next_track_id = self._first_available_track_id()
+        self.next_track_id = max(self.next_track_id, self._next_monotonic_track_id())
         self._reset_click_cycle()
         self._render_frame()
         self._persist_progress(silent=True)
@@ -751,14 +1163,33 @@ class BasketballMOTLabelerApp:
             return
         self._delete_track(track_id)
 
+    def cb_toggle_playback_button(self, _sender: Any, _app_data: Any) -> None:
+        self._toggle_playback_active_track()
+
     def _update_persist_text(self) -> None:
         if not self.ui_ready or not dpg.does_item_exist(self.persist_tag):
             return
         active = self.active_track_id if self.active_track_id is not None else "-"
         dpg.set_value(
             self.persist_tag,
-            f"Autosave: {self.current_seq.state_file.name} + gt.txt | frame={self.current_frame} active={active}",
+            (
+                f"Autosave: {self.current_seq.session_file.name}, "
+                f"{self.current_seq.absent_file.name}, gt.txt | frame={self.current_frame} active={active}"
+            ),
         )
+
+    def _render_frame_status_badge(self) -> None:
+        if not self.ui_ready or not dpg.does_item_exist(self.frame_status_drawlist_tag):
+            return
+        dpg.delete_item(self.frame_status_drawlist_tag, children_only=True)
+        if self.active_track_id is None:
+            return
+        has_pos = self._active_assignment(self.current_frame) is not None
+        has_neg = self.current_frame in self.absent_frames_by_track.get(self.active_track_id, set())
+        if has_pos:
+            dpg.draw_text((8, 8), "LABELED +", color=(40, 220, 60, 255), size=44, parent=self.frame_status_drawlist_tag)
+        elif has_neg:
+            dpg.draw_text((8, 8), "LABELED -", color=(220, 50, 50, 255), size=44, parent=self.frame_status_drawlist_tag)
 
     def _end_track(self) -> None:
         self._set_active_track(None)
@@ -767,44 +1198,107 @@ class BasketballMOTLabelerApp:
         self._render_frame()
         self._persist_session_state()
 
-    def _advance_with_iou(self) -> None:
-        if self.current_frame >= self.current_seq.seq_len:
-            return
-        next_frame = self.current_frame + 1
-        self.current_frame = next_frame
+    def _start_new_track(self) -> None:
+        self._stop_playback()
+        next_monotonic_id = self._next_monotonic_track_id()
+        self._set_active_track(next_monotonic_id)
+        self.next_track_id = next_monotonic_id + 1
+        self.current_frame = 1
+        self.focus_mode = False
+        self.skip_mode = False
+        self._reset_click_cycle()
         self._sync_frame_controls()
+        self._render_frame()
+        self._persist_session_state()
+        self._log_status(f"Started new track {next_monotonic_id} at frame 1.")
+
+    def _advance_with_iou(self) -> None:
         if self.active_track_id is None:
+            if self.current_frame >= self.current_seq.seq_len:
+                return
+            self.current_frame += 1
+            self._sync_frame_controls()
             self._render_frame()
             self._persist_session_state()
             return
         if self.skip_mode:
+            self._mark_absent_current_frame()
+            if self.current_frame >= self.current_seq.seq_len:
+                self._render_frame()
+                self._persist_session_state()
+                return
+            self.current_frame += 1
+            self._sync_frame_controls()
             self.focus_mode = False
             self._render_frame()
             self._persist_session_state()
             return
-        ref_box = self.last_assigned_box_by_track.get(self.active_track_id)
-        if ref_box is None:
+        saved = self._confirm_current_frame(emit_missing_msg=False)
+        if not saved:
+            # Spacebar linear pass: no confirmed box on this frame => explicit absent.
+            self._mark_absent_current_frame()
+            if self.current_frame >= self.current_seq.seq_len:
+                self._render_frame()
+                self._persist_session_state()
+                return
+            self.current_frame += 1
+            self._sync_frame_controls()
+            self.focus_mode = False
+            self.skip_mode = True
             self._render_frame()
             self._persist_session_state()
             return
-        best = self._best_iou_detection(frame=next_frame, ref_box=ref_box)
-        if best is not None:
-            self._assign_detection(best)
-        else:
-            self._render_frame()
-            self._persist_session_state()
+        if self.current_frame >= self.current_seq.seq_len:
+            return
+        self.current_frame += 1
+        self._sync_frame_controls()
+        self.focus_mode = True
+        self.skip_mode = False
+        self._render_frame()
+        self._persist_session_state()
 
     # DearPyGui callbacks
     def cb_sequence_changed(self, _sender: Any, app_data: Any) -> None:
         self._load_sequence(str(app_data))
 
     def cb_frame_slider(self, _sender: Any, app_data: Any) -> None:
+        self._stop_playback()
+        unreviewed_only = self.ui_ready and dpg.does_item_exist(self.unreviewed_only_tag) and bool(
+            dpg.get_value(self.unreviewed_only_tag)
+        )
+        if unreviewed_only:
+            frames = self._unreviewed_frames_for_active_track()
+            if frames:
+                idx = _clamp(int(app_data), 1, len(frames))
+                self._set_frame(frames[idx - 1])
+                return
         self._set_frame(int(app_data))
 
     def cb_frame_input(self, _sender: Any, app_data: Any) -> None:
+        self._stop_playback()
+        unreviewed_only = self.ui_ready and dpg.does_item_exist(self.unreviewed_only_tag) and bool(
+            dpg.get_value(self.unreviewed_only_tag)
+        )
+        if unreviewed_only:
+            frames = self._unreviewed_frames_for_active_track()
+            if frames:
+                idx = _clamp(int(app_data), 1, len(frames))
+                self._set_frame(frames[idx - 1])
+                return
         self._set_frame(int(app_data))
 
+    def cb_toggle_unreviewed_only(self, _sender: Any, app_data: Any) -> None:
+        if bool(app_data):
+            frames = self._unreviewed_frames_for_active_track()
+            if frames and self.current_frame not in frames:
+                next_frame = next((f for f in frames if f >= self.current_frame), None)
+                self.current_frame = next_frame if next_frame is not None else frames[-1]
+        self._sync_frame_controls()
+        self._render_frame()
+        self._persist_session_state()
+
     def cb_canvas_click(self, _sender: Any, _app_data: Any) -> None:
+        self._stop_playback()
         if not dpg.is_item_hovered(self.canvas_tag):
             return
         mx, my = dpg.get_mouse_pos(local=False)
@@ -817,6 +1311,10 @@ class BasketballMOTLabelerApp:
         img_y = local_y / self.scale_y
         hits = self._hit_detections_at_point(img_x, img_y)
         if hits:
+            if len(hits) == 1:
+                self._assign_detection(hits[0])
+                self._reset_click_cycle()
+                return
             signature: Tuple[Tuple[int, int], ...] = tuple((det.frame, det.det_idx) for det in hits)
             if self._is_same_click_region(img_x, img_y, signature):
                 self.cycle_step += 1
@@ -824,11 +1322,6 @@ class BasketballMOTLabelerApp:
                 self.cycle_step = 0
                 self.cycle_last_signature = signature
                 self.cycle_last_point_img = (img_x, img_y)
-
-            active_key = self._active_det_key_for_frame(self.current_frame)
-            if len(hits) == 1 and active_key == (hits[0].frame, hits[0].det_idx):
-                self._deselect_current_active()
-                return
 
             pick_idx = self.cycle_step % (len(hits) + 1)
             if pick_idx == len(hits):
@@ -850,18 +1343,20 @@ class BasketballMOTLabelerApp:
         self._persist_session_state()
 
     def cb_hotkey(self, _sender: Any, app_data: Any, _user_data: Any) -> None:
+        self._stop_playback()
         key = int(app_data)
         if key == dpg.mvKey_Q:
             self._end_track()
+        elif key == dpg.mvKey_Left or key == dpg.mvKey_A:
+            self._step_frame(-1)
+        elif key == dpg.mvKey_Right:
+            self._step_frame(1)
+        elif key == dpg.mvKey_D or key == dpg.mvKey_Delete:
+            self._delete_active_frame_assignment()
         elif key == dpg.mvKey_E:
-            tid = self._first_available_track_id()
-            self._set_active_track(tid)
-            self.next_track_id = max(self.next_track_id, tid + 1)
-            self.focus_mode = False
-            self._render_frame()
-            self._persist_session_state()
+            self._start_new_track()
         elif key == dpg.mvKey_S:
-            self._persist_progress(silent=False)
+            self._save_or_mark_absent_current_frame()
         elif key == dpg.mvKey_R:
             self._undo()
         elif key == dpg.mvKey_Spacebar:
@@ -903,8 +1398,42 @@ class BasketballMOTLabelerApp:
                 dpg.add_button(label="Save (S)", callback=lambda: self._save_gt())
                 dpg.add_button(label="Undo (R)", callback=lambda: self._undo())
                 dpg.add_button(label="End track (Q)", callback=lambda: self._end_track())
+                dpg.add_button(label="New track (E)", callback=lambda: self._start_new_track())
                 dpg.add_button(label="Save All", callback=lambda: self._persist_progress(silent=False))
 
+            dpg.add_text("", tag=self.status_tag)
+            dpg.add_text("", tag=self.persist_tag)
+            dpg.add_spacer(height=6)
+            with dpg.group(horizontal=True):
+                dpg.add_drawlist(width=self.left_pane_w, height=self.display_h, tag=self.canvas_tag)
+                dpg.add_spacer(width=self.main_gap_w)
+                with dpg.child_window(width=self.side_panel_w, height=self.display_h, border=True):
+                    dpg.add_text("Tracks")
+                    dpg.add_drawlist(
+                        width=max(120, self.side_panel_w - 24),
+                        height=70,
+                        tag=self.frame_status_drawlist_tag,
+                    )
+                    dpg.add_spacer(height=6)
+                    with dpg.table(
+                        header_row=True,
+                        borders_innerH=True,
+                        borders_outerH=True,
+                        borders_innerV=True,
+                        borders_outerV=True,
+                        row_background=True,
+                        resizable=False,
+                        policy=dpg.mvTable_SizingStretchProp,
+                        tag=self.track_table_tag,
+                    ):
+                        dpg.add_table_column(label="Track ID")
+                        dpg.add_table_column(label="Boxes")
+                        dpg.add_table_column(label="Reviewed")
+                        dpg.add_table_column(label="%")
+                        dpg.add_table_column(label="Active")
+                        dpg.add_table_column(label="Actions")
+
+            dpg.add_spacer(height=8)
             with dpg.group(horizontal=True):
                 dpg.add_slider_int(
                     tag=self.frame_slider_tag,
@@ -921,29 +1450,30 @@ class BasketballMOTLabelerApp:
                     width=100,
                 )
 
-            dpg.add_text("", tag=self.status_tag)
-            dpg.add_text("", tag=self.persist_tag)
-            dpg.add_spacer(height=6)
             with dpg.group(horizontal=True):
-                dpg.add_drawlist(width=self.left_pane_w, height=self.display_h, tag=self.canvas_tag)
-                dpg.add_spacer(width=self.main_gap_w)
-                with dpg.child_window(width=self.side_panel_w, height=self.display_h, border=True):
-                    dpg.add_text("Tracks")
-                    with dpg.table(
-                        header_row=True,
-                        borders_innerH=True,
-                        borders_outerH=True,
-                        borders_innerV=True,
-                        borders_outerV=True,
-                        row_background=True,
-                        resizable=False,
-                        policy=dpg.mvTable_SizingStretchProp,
-                        tag=self.track_table_tag,
-                    ):
-                        dpg.add_table_column(label="Track ID")
-                        dpg.add_table_column(label="Frames")
-                        dpg.add_table_column(label="Active")
-                        dpg.add_table_column(label="Actions")
+                dpg.add_button(
+                    label="Play track",
+                    tag=self.playback_button_tag,
+                    callback=self.cb_toggle_playback_button,
+                    width=120,
+                )
+                dpg.add_checkbox(
+                    label="Unreviewed only",
+                    tag=self.unreviewed_only_tag,
+                    default_value=False,
+                    callback=self.cb_toggle_unreviewed_only,
+                )
+                dpg.add_checkbox(
+                    label="Loop playback",
+                    tag=self.playback_loop_tag,
+                    default_value=False,
+                )
+                dpg.add_checkbox(
+                    label="Spotlight",
+                    tag=self.spotlight_tag,
+                    default_value=False,
+                    callback=lambda _s, _a: self._render_frame(),
+                )
 
         with dpg.item_handler_registry(tag="bmot_canvas_handlers"):
             dpg.add_item_clicked_handler(callback=self.cb_canvas_click)
@@ -951,7 +1481,10 @@ class BasketballMOTLabelerApp:
 
         with dpg.handler_registry():
             dpg.add_key_press_handler(key=dpg.mvKey_D, callback=self.cb_hotkey)
+            dpg.add_key_press_handler(key=dpg.mvKey_Delete, callback=self.cb_hotkey)
             dpg.add_key_press_handler(key=dpg.mvKey_A, callback=self.cb_hotkey)
+            dpg.add_key_press_handler(key=dpg.mvKey_Left, callback=self.cb_hotkey)
+            dpg.add_key_press_handler(key=dpg.mvKey_Right, callback=self.cb_hotkey)
             dpg.add_key_press_handler(key=dpg.mvKey_W, callback=self.cb_hotkey)
             dpg.add_key_press_handler(key=dpg.mvKey_Q, callback=self.cb_hotkey)
             dpg.add_key_press_handler(key=dpg.mvKey_E, callback=self.cb_hotkey)
@@ -969,7 +1502,9 @@ class BasketballMOTLabelerApp:
         self._render_frame()
         self._refresh_track_table()
         self._update_persist_text()
-        dpg.start_dearpygui()
+        while dpg.is_dearpygui_running():
+            self._tick_playback()
+            dpg.render_dearpygui_frame()
         dpg.destroy_context()
 
 
