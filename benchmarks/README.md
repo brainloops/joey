@@ -122,7 +122,7 @@ python benchmarks/generate_motchallenge_detections_rfdetr.py \
   --detector FRCNN \
   --model-size small \
   --batch-size 8 \
-  --threshold 0.25
+  --threshold 0.4
 ```
 
 By default this writes `det/det_rfdetr.txt` in each sequence.
@@ -145,7 +145,7 @@ python benchmarks/generate_motchallenge_detections_rfdetr.py \
   --split val \
   --model-size small \
   --batch-size 8 \
-  --threshold 0.25 \
+  --threshold 0.4 \
   --write-det-txt \
   --overwrite
 ```
@@ -185,7 +185,7 @@ python benchmarks/generate_motchallenge_detections_rfdetr.py \
   --split val \
   --model-size small \
   --batch-size 8 \
-  --threshold 0.25 \
+  --threshold 0.4 \
   --write-det-txt \
   --overwrite
 ```

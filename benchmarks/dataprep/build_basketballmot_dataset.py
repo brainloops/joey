@@ -70,7 +70,7 @@ def _probe_video(path: Path) -> tuple[int, int, float]:
     return width, height, fps
 
 
-def _extract_frames(clip_path: Path, out_img_dir: Path, overwrite: bool) -> int:
+def _extract_frames(clip_path: Path, out_img_dir: Path, overwrite: bool, target_fps: float | None) -> int:
     if overwrite and out_img_dir.exists():
         shutil.rmtree(out_img_dir)
     out_img_dir.mkdir(parents=True, exist_ok=True)
@@ -79,10 +79,16 @@ def _extract_frames(clip_path: Path, out_img_dir: Path, overwrite: bool) -> int:
         "-y",
         "-i",
         str(clip_path),
+    ]
+    if target_fps is not None and target_fps > 0:
+        cmd.extend(["-vf", f"fps={target_fps:g}"])
+    cmd.extend(
+        [
         "-start_number",
         "1",
         str(out_img_dir / "%06d.jpg"),
-    ]
+        ]
+    )
     subprocess.run(cmd, check=True)
     frames = [p for p in out_img_dir.iterdir() if p.is_file() and p.suffix.lower() == ".jpg"]
     return len(frames)
@@ -103,9 +109,10 @@ def _write_seqinfo(path: Path, name: str, seq_len: int, width: int, height: int,
 
 
 def _safe_symlink(target: Path, link: Path) -> None:
+    target = target.resolve()
     if link.is_symlink():
         current = link.resolve()
-        if current == target.resolve():
+        if current == target:
             return
         link.unlink()
     elif link.exists():
@@ -150,6 +157,12 @@ def main() -> int:
         action="store_true",
         help="Re-extract frames if img1 already exists",
     )
+    parser.add_argument(
+        "--target-fps",
+        type=float,
+        default=30.0,
+        help="Target frame sampling rate for img1 extraction. Use <=0 to preserve source FPS.",
+    )
     args = parser.parse_args()
 
     manifest = _load_manifest(args.manifest)
@@ -187,13 +200,19 @@ def main() -> int:
         (gt_dir / "gt.txt").touch(exist_ok=True)
 
         width, height, fps = _probe_video(clip_path)
+        effective_fps = fps if args.target_fps <= 0 else float(args.target_fps)
         if img_dir.is_dir() and any(img_dir.iterdir()) and not args.overwrite_frames:
             jpgs = [p for p in img_dir.iterdir() if p.is_file() and p.suffix.lower() == ".jpg"]
             frame_count = len(jpgs)
             print(f"[INFO] Reusing existing frames for {clip_id}: {frame_count}")
         else:
-            frame_count = _extract_frames(clip_path=clip_path, out_img_dir=img_dir, overwrite=args.overwrite_frames)
-            print(f"[INFO] Extracted {frame_count} frames for {clip_id}")
+            frame_count = _extract_frames(
+                clip_path=clip_path,
+                out_img_dir=img_dir,
+                overwrite=args.overwrite_frames,
+                target_fps=(None if args.target_fps <= 0 else float(args.target_fps)),
+            )
+            print(f"[INFO] Extracted {frame_count} frames for {clip_id} at fps={effective_fps:g}")
 
         if frame_count <= 0:
             print(f"[WARN] No frames extracted for {clip_id}; skipping seqinfo.")
@@ -205,7 +224,7 @@ def main() -> int:
             seq_len=frame_count,
             width=width,
             height=height,
-            fps=fps,
+            fps=effective_fps,
         )
         built += 1
 

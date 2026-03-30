@@ -595,7 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--split", default="val", choices=["train", "val", "test"])
     detect.add_argument("--dataset-root", default="benchmarks/datasets/DanceTrack")
     detect.add_argument("--model-size", default="small", choices=["nano", "small", "medium", "large"])
-    detect.add_argument("--threshold", type=float, default=0.25)
+    detect.add_argument("--threshold", type=float, default=0.4)
     detect.add_argument("--batch-size", type=int, default=8)
     detect.add_argument("--detector", choices=["FRCNN", "DPM", "SDP", "all"], default="FRCNN")
     detect.add_argument("--det-filename", default="det_rfdetr.txt")

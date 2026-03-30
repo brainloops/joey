@@ -63,7 +63,7 @@ Script behavior:
 After clips exist, build MOT-style sequence folders:
 
 ```bash
-python benchmarks/dataprep/build_basketballmot_dataset.py
+python benchmarks/dataprep/build_basketballmot_dataset.py --target-fps 30
 ```
 
 This creates:
@@ -77,3 +77,9 @@ And TrackEval metadata:
 
 - `benchmarks/trackeval_data/gt/mot_challenge/BasketballMOT-train/<clip_id>` (symlink)
 - `benchmarks/trackeval_data/gt/mot_challenge/seqmaps/BasketballMOT-train.txt`
+
+Notes:
+
+- Default extraction now samples to `30 FPS` for `img1`.
+- Use `--target-fps <= 0` to preserve source FPS.
+- For a clean FPS change on existing sequences, run with `--overwrite-frames`.

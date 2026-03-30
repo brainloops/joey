@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.25,
+        default=0.4,
         help="RF-DETR confidence threshold.",
     )
     parser.add_argument(
