@@ -21,6 +21,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+sv = None
+tk = None
+
+try:
+    import supervision as sv  # type: ignore
+except Exception:
+    sv = None
+
+try:
+    import trackers as tk  # type: ignore
+except Exception:
+    tk = None
 
 try:
     import dearpygui.dearpygui as dpg
@@ -246,6 +258,8 @@ class BasketballMOTLabelerApp:
         self.seq_combo_tag = "bmot_seq_combo"
         self.track_table_tag = "bmot_track_table"
         self.persist_tag = "bmot_persist_text"
+        self.track_full_pass_button_tag = "bmot_track_full_pass_button"
+        self.retrack_from_here_button_tag = "bmot_retrack_from_here_button"
 
         self.texture_w = 1
         self.texture_h = 1
@@ -267,6 +281,11 @@ class BasketballMOTLabelerApp:
         self.main_gap_w = 14
         self.left_pane_w = 1100
         self.frame_status_drawlist_tag = "bmot_frame_status_drawlist"
+        self.tracker_name = "ByteTrack"
+        self.tracker_available, self.tracker_unavailable_reason = self._check_tracker_runtime()
+        self.last_tracker_seed_frame: Optional[int] = None
+        self.last_tracker_seed_track_id: Optional[int] = None
+        self.initial_full_pass_done_tracks: set[int] = set()
 
         self._load_sequence(self.current_seq.name)
 
@@ -280,6 +299,100 @@ class BasketballMOTLabelerApp:
         rgba = np.concatenate([rgb, alpha], axis=2)
         return (rgba.astype(np.float32) / 255.0).flatten()
 
+    def _check_tracker_runtime(self) -> Tuple[bool, str]:
+        if sv is None or tk is None:
+            return (
+                False,
+                "Install tracker deps in this env: pip install trackers supervision",
+            )
+        return True, ""
+
+    def _create_bytetrack_tracker(self):
+        if tk is None:
+            raise RuntimeError("Missing 'trackers' package.")
+        for attr in ("ByteTrackTracker", "BYTESORTTracker", "BYTETrackTracker"):
+            if hasattr(tk, attr):
+                return getattr(tk, attr)()
+        raise RuntimeError("No ByteTrack class found in installed trackers package.")
+
+    @staticmethod
+    def _to_tracker_detections(rows: List[Detection]):
+        if sv is None:
+            raise RuntimeError("Missing 'supervision' package.")
+        if not rows:
+            return sv.Detections.empty()
+        xyxy = np.asarray([[r.x, r.y, r.x + r.w, r.y + r.h] for r in rows], dtype=np.float32)
+        confidence = np.asarray([r.score for r in rows], dtype=np.float32)
+        class_id = np.asarray([r.class_id for r in rows], dtype=np.int32)
+        return sv.Detections(xyxy=xyxy, confidence=confidence, class_id=class_id)
+
+    @staticmethod
+    def _update_tracker(tracker, detections):
+        if hasattr(tracker, "update_with_detections"):
+            return tracker.update_with_detections(detections)
+        if hasattr(tracker, "update"):
+            return tracker.update(detections)
+        raise RuntimeError("Tracker has no compatible update method.")
+
+    @staticmethod
+    def _extract_tracker_rows(tracked) -> List[Tuple[int, float, float, float, float, float]]:
+        if tracked is None:
+            return []
+        tracker_ids = getattr(tracked, "tracker_id", None)
+        if tracker_ids is None and hasattr(tracked, "data"):
+            data = tracked.data if tracked.data is not None else {}
+            tracker_ids = data.get("tracker_id")
+        if tracker_ids is None:
+            return []
+        ids = np.asarray(tracker_ids)
+        xyxy = getattr(tracked, "xyxy", None)
+        if xyxy is None:
+            return []
+        conf = getattr(tracked, "confidence", None)
+        rows: List[Tuple[int, float, float, float, float, float]] = []
+        for i, raw_id in enumerate(ids):
+            if raw_id is None:
+                continue
+            try:
+                tid = int(raw_id)
+            except Exception:
+                continue
+            if tid < 0 or i >= len(xyxy):
+                continue
+            b = xyxy[i]
+            x = float(b[0])
+            y = float(b[1])
+            w = float(b[2] - b[0])
+            h = float(b[3] - b[1])
+            score = 1.0
+            if conf is not None and len(conf) > i:
+                try:
+                    score = float(conf[i])
+                except Exception:
+                    score = 1.0
+            rows.append((tid, x, y, w, h, score))
+        return rows
+
+    def _run_bytetrack_frames(
+        self,
+        start_frame: int,
+    ) -> Dict[int, List[Tuple[int, float, float, float, float, float]]]:
+        tracker = self._create_bytetrack_tracker()
+        by_frame: Dict[int, List[Tuple[int, float, float, float, float, float]]] = {}
+        for frame_idx in range(start_frame, self.current_seq.seq_len + 1):
+            dets = self._to_tracker_detections(self.detections_by_frame.get(frame_idx, []))
+            tracked = self._update_tracker(tracker, dets)
+            by_frame[frame_idx] = self._extract_tracker_rows(tracked)
+        return by_frame
+
+    def _update_tracker_controls(self) -> None:
+        if not self.ui_ready:
+            return
+        can_track_now = self.tracker_available and self.active_track_id is not None
+        for tag in (self.track_full_pass_button_tag, self.retrack_from_here_button_tag):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, enabled=can_track_now)
+
     def _log_status(self, msg: str) -> None:
         if self.ui_ready and dpg.does_item_exist(self.status_tag):
             dpg.set_value(self.status_tag, msg)
@@ -289,6 +402,7 @@ class BasketballMOTLabelerApp:
         if self.ui_ready and dpg.does_item_exist(self.track_tag):
             dpg.set_value(self.track_tag, f"Active track: {track_id if track_id is not None else 'None'}")
         self._update_playback_controls()
+        self._update_tracker_controls()
         self._update_persist_text()
 
     def _load_sequence(self, seq_name: str) -> None:
@@ -302,6 +416,7 @@ class BasketballMOTLabelerApp:
         self.undo_stack = []
         self.focus_mode = False
         self.skip_mode = False
+        self.initial_full_pass_done_tracks = set()
         self.cycle_last_point_img = None
         self.cycle_last_signature = None
         self.cycle_step = 0
@@ -515,6 +630,206 @@ class BasketballMOTLabelerApp:
                 best_iou = iou
                 best_key = key
         return best_key if best_iou >= 0.5 else None
+
+    def _clear_active_track_from_frame(self, start_frame: int) -> None:
+        if self.active_track_id is None:
+            return
+        tid = self.active_track_id
+        rows = self.assignments_by_track.get(tid, {})
+        for frame in [f for f in rows.keys() if f >= start_frame]:
+            asn = rows.pop(frame, None)
+            if asn is not None and asn.det_key is not None and asn.det_key in self.assigned_det_keys:
+                self.assigned_det_keys.remove(asn.det_key)
+        absent = self.absent_frames_by_track.get(tid, set())
+        self.absent_frames_by_track[tid] = {f for f in absent if f < start_frame}
+
+    def _set_assignment_for_active_track(
+        self,
+        frame: int,
+        box: Tuple[float, float, float, float],
+    ) -> None:
+        if self.active_track_id is None:
+            return
+        tid = self.active_track_id
+        x, y, w, h = box
+        if w <= 0 or h <= 0:
+            return
+        rows = self.assignments_by_track.setdefault(tid, {})
+        prev = rows.get(frame)
+        if prev is not None and prev.det_key is not None and prev.det_key in self.assigned_det_keys:
+            self.assigned_det_keys.remove(prev.det_key)
+        det_key = self._match_detection_key(frame=frame, box=(x, y, w, h))
+        asn = Assignment(track_id=tid, frame=frame, x=x, y=y, w=w, h=h, det_key=det_key)
+        rows[frame] = asn
+        if det_key is not None:
+            self.assigned_det_keys.add(det_key)
+        self.last_assigned_box_by_track[tid] = (x, y, w, h)
+        self.absent_frames_by_track.setdefault(tid, set()).discard(frame)
+
+    def _best_detection_box_for_frame(
+        self,
+        frame: int,
+        ref_box: Tuple[float, float, float, float],
+    ) -> Tuple[Optional[Tuple[float, float, float, float]], float]:
+        best_box: Optional[Tuple[float, float, float, float]] = None
+        best_iou = -1.0
+        for det in self.detections_by_frame.get(frame, []):
+            cand = (det.x, det.y, det.w, det.h)
+            iou = _bbox_iou(ref_box, cand)
+            if iou > best_iou:
+                best_iou = iou
+                best_box = cand
+        return best_box, best_iou
+
+    def _select_tracker_id_from_seed(
+        self,
+        seed_frame: int,
+        seed_box: Tuple[float, float, float, float],
+        tracked_rows_by_frame: Dict[int, List[Tuple[int, float, float, float, float, float]]],
+        allow_lookahead_fallback: bool,
+    ) -> Optional[int]:
+        rows = tracked_rows_by_frame.get(seed_frame, [])
+        def _best_match(
+            box: Tuple[float, float, float, float],
+            cand_rows: List[Tuple[int, float, float, float, float, float]],
+        ) -> Tuple[Optional[int], float, float]:
+            best_tid_local: Optional[int] = None
+            best_iou_local = -1.0
+            best_dist_norm_local = float("inf")
+            bx = box[0] + (box[2] * 0.5)
+            by = box[1] + (box[3] * 0.5)
+            box_diag = max(1.0, float(np.hypot(box[2], box[3])))
+            best_score = -1.0
+            for tid, x, y, w, h, _score in cand_rows:
+                iou = _bbox_iou(box, (x, y, w, h))
+                cx = x + (w * 0.5)
+                cy = y + (h * 0.5)
+                dist = float(np.hypot(bx - cx, by - cy))
+                dist_norm = dist / box_diag
+                score = iou + max(0.0, 1.0 - min(1.0, dist_norm))
+                if score > best_score:
+                    best_score = score
+                    best_tid_local = tid
+                    best_iou_local = iou
+                    best_dist_norm_local = dist_norm
+            return best_tid_local, best_iou_local, best_dist_norm_local
+
+        frame_tid, frame_iou, frame_dist_norm = _best_match(seed_box, rows)
+        # Strict same-frame gating for retrack: avoid selecting distant players.
+        if frame_tid is not None and (frame_iou >= 0.10 or frame_dist_norm <= 1.25):
+            return frame_tid
+        if not allow_lookahead_fallback:
+            return None
+
+        # ByteTrack may not emit stable positive IDs on the first frame(s).
+        # Fallback: follow likely person motion using raw detections, then map to
+        # the first reliable tracker ID in a short lookahead window.
+        anchor_box = seed_box
+        lookahead_end = min(self.current_seq.seq_len, seed_frame + 60)
+        fallback_tid: Optional[int] = None
+        fallback_score = -1.0
+        fallback_dist_norm = float("inf")
+        for frame_idx in range(seed_frame, lookahead_end + 1):
+            if frame_idx > seed_frame:
+                best_det_box, best_det_iou = self._best_detection_box_for_frame(frame_idx, anchor_box)
+                if best_det_box is not None and best_det_iou > 0.01:
+                    anchor_box = best_det_box
+            tid, iou, dist_norm = _best_match(anchor_box, tracked_rows_by_frame.get(frame_idx, []))
+            if tid is None:
+                continue
+            score = iou + max(0.0, 1.0 - min(1.0, dist_norm))
+            if score > fallback_score:
+                fallback_score = score
+                fallback_tid = tid
+                fallback_dist_norm = dist_norm
+
+        # Keep bootstrap permissive but still reject implausibly distant matches.
+        if fallback_tid is not None and fallback_dist_norm <= 2.0:
+            return fallback_tid
+        return None
+
+    def _adopt_tracker_path(
+        self,
+        start_frame: int,
+        tracker_track_id: int,
+        tracked_rows_by_frame: Dict[int, List[Tuple[int, float, float, float, float, float]]],
+        seed_box: Optional[Tuple[float, float, float, float]] = None,
+    ) -> None:
+        if self.active_track_id is None:
+            return
+        self._clear_active_track_from_frame(start_frame=start_frame)
+        tid = self.active_track_id
+        first_frame = start_frame
+        if seed_box is not None:
+            # Keep manual click as a hard anchor for this frame.
+            self._set_assignment_for_active_track(frame=start_frame, box=seed_box)
+            first_frame = start_frame + 1
+        for frame_idx in range(first_frame, self.current_seq.seq_len + 1):
+            rows = tracked_rows_by_frame.get(frame_idx, [])
+            match = next((r for r in rows if r[0] == tracker_track_id), None)
+            if match is None:
+                self.absent_frames_by_track.setdefault(tid, set()).add(frame_idx)
+                continue
+            _track_id, x, y, w, h, _score = match
+            self._set_assignment_for_active_track(frame=frame_idx, box=(x, y, w, h))
+
+    def _run_tracking_from_seed(self, start_frame: int, allow_lookahead_fallback: bool) -> None:
+        if not self.tracker_available:
+            self._log_status(self.tracker_unavailable_reason)
+            return
+        if self.active_track_id is None:
+            self._log_status("Choose or create an active track first.")
+            return
+        seed_asn = self._active_assignment(start_frame)
+        if seed_asn is None:
+            self._log_status("Select/correct a box on this frame first, then track.")
+            return
+        try:
+            tracked_rows = self._run_bytetrack_frames(start_frame=start_frame)
+        except Exception as exc:
+            self._log_status(f"{self.tracker_name} failed: {exc}")
+            return
+        seed_tid = self._select_tracker_id_from_seed(
+            seed_frame=start_frame,
+            seed_box=(seed_asn.x, seed_asn.y, seed_asn.w, seed_asn.h),
+            tracked_rows_by_frame=tracked_rows,
+            allow_lookahead_fallback=allow_lookahead_fallback,
+        )
+        if seed_tid is None:
+            self._log_status(
+                "Could not map seed click to a nearby ByteTrack ID. "
+                "Try clicking the exact person box on this frame, then retry."
+            )
+            return
+        self.last_tracker_seed_frame = start_frame
+        self.last_tracker_seed_track_id = seed_tid
+        self._adopt_tracker_path(
+            start_frame=start_frame,
+            tracker_track_id=seed_tid,
+            tracked_rows_by_frame=tracked_rows,
+            seed_box=(seed_asn.x, seed_asn.y, seed_asn.w, seed_asn.h),
+        )
+        self.focus_mode = True
+        self.skip_mode = False
+        self._render_frame()
+        self._persist_progress(silent=True)
+        self._log_status(
+            f"{self.tracker_name} adopted from frame {start_frame} for track {self.active_track_id} (tracker id={seed_tid})."
+        )
+
+    def _run_initial_full_pass(self) -> None:
+        if self.active_track_id is None:
+            self._log_status("Choose or create an active track first.")
+            return
+        if self.current_frame != 1:
+            self._log_status("Initial full pass starts at frame 1. Go to frame 1 or use Re-track from here.")
+            return
+        if self.active_track_id in self.initial_full_pass_done_tracks:
+            self._log_status("Initial full pass already done for this track. Use Re-track from here for corrections.")
+            return
+        self._run_tracking_from_seed(start_frame=1, allow_lookahead_fallback=True)
+        self.initial_full_pass_done_tracks.add(self.active_track_id)
+        self._start_track_playback(self.active_track_id, start_frame=1)
 
     def _sequence_frame_path(self, frame: int) -> Path:
         ext = self.current_seq.im_ext or ".jpg"
@@ -796,13 +1111,21 @@ class BasketballMOTLabelerApp:
 
         assigned_count = len(self.assigned_det_keys)
         all_count = sum(len(v) for v in self.detections_by_frame.values())
+        active_boxes = 0
+        active_reviewed = 0
+        if self.active_track_id is not None:
+            active_boxes = len(self.assignments_by_track.get(self.active_track_id, {}))
+            active_absent = len(self.absent_frames_by_track.get(self.active_track_id, set()))
+            active_reviewed = active_boxes + active_absent
         self._log_status(
             f"{self.current_seq.name} | frame {self.current_frame}/{self.current_seq.seq_len} | "
             f"active={self.active_track_id if self.active_track_id is not None else '-'} | "
-            f"assigned={assigned_count}/{all_count}"
+            f"track_boxes={active_boxes}/{self.current_seq.seq_len} reviewed={active_reviewed}/{self.current_seq.seq_len} | "
+            f"global_assigned={assigned_count}/{all_count}"
         )
         self._refresh_track_table()
         self._render_frame_status_badge()
+        self._update_tracker_controls()
 
     def _step_frame(self, delta: int) -> None:
         unreviewed_only = self.ui_ready and dpg.does_item_exist(self.unreviewed_only_tag) and bool(
@@ -1067,7 +1390,7 @@ class BasketballMOTLabelerApp:
                     dpg.add_button(label="Use", callback=self.cb_use_track_row, user_data=tid, width=54)
                     dpg.add_button(label="Del", callback=self.cb_delete_track_row, user_data=tid, width=54)
 
-    def _start_track_playback(self, track_id: int) -> None:
+    def _start_track_playback(self, track_id: int, start_frame: Optional[int] = None) -> None:
         if track_id not in self.assignments_by_track and track_id not in self.absent_frames_by_track:
             return
         self.playback_track_id = track_id
@@ -1076,7 +1399,8 @@ class BasketballMOTLabelerApp:
         self._set_active_track(track_id)
         self.focus_mode = False
         self.skip_mode = False
-        self.current_frame = 1
+        if start_frame is not None:
+            self.current_frame = _clamp(start_frame, 1, max(1, self.current_seq.seq_len))
         self._sync_frame_controls()
         self._render_frame()
         self._update_playback_controls()
@@ -1126,7 +1450,7 @@ class BasketballMOTLabelerApp:
         if self.active_track_id is None:
             self._log_status("Select/Use a track first, then press Play track.")
             return
-        self._start_track_playback(self.active_track_id)
+        self._start_track_playback(self.active_track_id, start_frame=self.current_frame)
 
     def _update_playback_controls(self) -> None:
         if not self.ui_ready or not dpg.does_item_exist(self.playback_button_tag):
@@ -1156,6 +1480,8 @@ class BasketballMOTLabelerApp:
                 self.assigned_det_keys.remove(asn.det_key)
         if track_id in self.last_assigned_box_by_track:
             del self.last_assigned_box_by_track[track_id]
+        if track_id in self.initial_full_pass_done_tracks:
+            self.initial_full_pass_done_tracks.remove(track_id)
         if self.active_track_id == track_id:
             self._set_active_track(None)
             self.focus_mode = False
@@ -1182,6 +1508,18 @@ class BasketballMOTLabelerApp:
 
     def cb_toggle_playback_button(self, _sender: Any, _app_data: Any) -> None:
         self._toggle_playback_active_track()
+
+    def cb_track_full_pass_button(self, _sender: Any, _app_data: Any) -> None:
+        self._stop_playback()
+        self._run_initial_full_pass()
+        self._update_tracker_controls()
+
+    def cb_retrack_from_here_button(self, _sender: Any, _app_data: Any) -> None:
+        self._stop_playback()
+        self._run_tracking_from_seed(start_frame=self.current_frame, allow_lookahead_fallback=False)
+        if self.active_track_id is not None:
+            self._start_track_playback(self.active_track_id, start_frame=self.current_frame)
+        self._update_tracker_controls()
 
     def _update_persist_text(self) -> None:
         if not self.ui_ready or not dpg.does_item_exist(self.persist_tag):
@@ -1360,8 +1698,13 @@ class BasketballMOTLabelerApp:
         self._persist_session_state()
 
     def cb_hotkey(self, _sender: Any, app_data: Any, _user_data: Any) -> None:
-        self._stop_playback()
         key = int(app_data)
+        if key == dpg.mvKey_Spacebar:
+            self._toggle_playback_active_track()
+            return
+
+        # For non-playback hotkeys, freeze playback first to avoid edits while running.
+        self._stop_playback()
         if key == dpg.mvKey_Q:
             self._end_track()
         elif key == dpg.mvKey_Left or key == dpg.mvKey_A:
@@ -1376,8 +1719,12 @@ class BasketballMOTLabelerApp:
             self._save_or_mark_absent_current_frame()
         elif key == dpg.mvKey_R:
             self._undo()
-        elif key == dpg.mvKey_Spacebar:
-            self._advance_with_iou()
+        elif key == dpg.mvKey_T:
+            self._run_initial_full_pass()
+        elif key == dpg.mvKey_Y:
+            self._run_tracking_from_seed(start_frame=self.current_frame, allow_lookahead_fallback=False)
+            if self.active_track_id is not None:
+                self._start_track_playback(self.active_track_id, start_frame=self.current_frame)
 
     def build_ui(self) -> None:
         screen_w, screen_h = _get_screen_size()
@@ -1416,10 +1763,24 @@ class BasketballMOTLabelerApp:
                 dpg.add_button(label="Undo (R)", callback=lambda: self._undo())
                 dpg.add_button(label="End track (Q)", callback=lambda: self._end_track())
                 dpg.add_button(label="New track (E)", callback=lambda: self._start_new_track())
+                dpg.add_button(
+                    label="Track full pass",
+                    tag=self.track_full_pass_button_tag,
+                    callback=self.cb_track_full_pass_button,
+                )
+                dpg.add_button(
+                    label="Re-track from here",
+                    tag=self.retrack_from_here_button_tag,
+                    callback=self.cb_retrack_from_here_button,
+                )
                 dpg.add_button(label="Save All", callback=lambda: self._persist_progress(silent=False))
 
             dpg.add_text("", tag=self.status_tag)
             dpg.add_text("", tag=self.persist_tag)
+            if self.tracker_available:
+                dpg.add_text("Tracker: ByteTrack ready")
+            else:
+                dpg.add_text(f"Tracker unavailable: {self.tracker_unavailable_reason}")
             dpg.add_spacer(height=6)
             with dpg.group(horizontal=True):
                 dpg.add_drawlist(width=self.left_pane_w, height=self.display_h, tag=self.canvas_tag)
@@ -1469,7 +1830,7 @@ class BasketballMOTLabelerApp:
 
             with dpg.group(horizontal=True):
                 dpg.add_button(
-                    label="Play track",
+                    label="Play/Pause track",
                     tag=self.playback_button_tag,
                     callback=self.cb_toggle_playback_button,
                     width=120,
@@ -1507,6 +1868,8 @@ class BasketballMOTLabelerApp:
             dpg.add_key_press_handler(key=dpg.mvKey_E, callback=self.cb_hotkey)
             dpg.add_key_press_handler(key=dpg.mvKey_S, callback=self.cb_hotkey)
             dpg.add_key_press_handler(key=dpg.mvKey_R, callback=self.cb_hotkey)
+            dpg.add_key_press_handler(key=dpg.mvKey_T, callback=self.cb_hotkey)
+            dpg.add_key_press_handler(key=dpg.mvKey_Y, callback=self.cb_hotkey)
             dpg.add_key_press_handler(key=dpg.mvKey_Spacebar, callback=self.cb_hotkey)
 
         self.ui_ready = True
