@@ -249,6 +249,8 @@ class BasketballMOTLabelerApp:
 
         self.texture_w = 1
         self.texture_h = 1
+        self.texture_alloc_w = 1
+        self.texture_alloc_h = 1
         self.display_w = 1280
         self.display_h = 720
         self.scale_x = 1.0
@@ -538,15 +540,30 @@ class BasketballMOTLabelerApp:
         self.scale_x = self.display_w / max(1, self.texture_w)
         self.scale_y = self.display_h / max(1, self.texture_h)
         initial = self._rgb_to_texture_data(rgb)
-        if dpg.does_item_exist(self.texture_tag):
-            dpg.delete_item(self.texture_tag)
-        dpg.add_dynamic_texture(
-            width=self.texture_w,
-            height=self.texture_h,
-            default_value=initial,
-            tag=self.texture_tag,
-            parent="bmot_texture_registry",
+        # Reallocate only when dimensions actually change. Recreating texture
+        # objects repeatedly during sequence switches can destabilize DearPyGui.
+        needs_realloc = (
+            (not dpg.does_item_exist(self.texture_tag))
+            or self.texture_alloc_w != self.texture_w
+            or self.texture_alloc_h != self.texture_h
         )
+        if needs_realloc:
+            if dpg.does_item_exist(self.texture_tag):
+                dpg.delete_item(self.texture_tag)
+            elif dpg.does_alias_exist(self.texture_tag):
+                # Defensive cleanup for stale alias-only state.
+                dpg.remove_alias(self.texture_tag)
+            dpg.add_dynamic_texture(
+                width=self.texture_w,
+                height=self.texture_h,
+                default_value=initial,
+                tag=self.texture_tag,
+                parent="bmot_texture_registry",
+            )
+            self.texture_alloc_w = self.texture_w
+            self.texture_alloc_h = self.texture_h
+        else:
+            dpg.set_value(self.texture_tag, initial)
         dpg.configure_item(self.canvas_tag, width=self.display_w, height=self.display_h)
 
     def _sync_frame_controls(self) -> None:
