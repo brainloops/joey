@@ -31,9 +31,12 @@ Optional:
 python labeling/basketball-mot-labeler.py --dataset-root benchmarks/datasets/BasketballMOT --split train
 ```
 
-## Tracker-Assisted Mode (ByteTrack)
+## Tracker Editor Mode
 
-The labeler supports a ByteTrack-assisted workflow for faster pass-and-correct labeling.
+The labeler runs in a single-pass tracker-editor workflow with three runtime-selectable trackers:
+- `ByteTrack`
+- `OCSort`
+- `McByte` (Track-all pipeline)
 
 ### Dependencies
 
@@ -43,40 +46,29 @@ Install tracker dependencies in the same environment as the labeler:
 pip install trackers supervision
 ```
 
-If these packages are missing, the tracker buttons are disabled and the app stays in manual mode.
+If these packages are missing, tracker actions are disabled.
 
 ### Workflow
 
-1. Create/select an active track (`E` or `Use` in track table).
-2. On the current frame, click the target player's detection box to seed/correct.
-3. Keep **Tracking enabled** ON (default), then press `Space` to seed ByteTrack from the current box and autoplay.
-4. Press `Space` to pause when occlusions/overlaps happen.
-5. Correct by clicking the right box on the paused frame.
-6. Use `Right` to advance one frame at a time with autosave, or `Space` to resume fast autoplay.
-7. Turn **Tracking enabled** OFF for review-only playback/navigation.
+Use **Track all** to run detector outputs through the selected tracker across the full sequence, then auto-populate the right-side track table with generated track IDs.
 
 Notes:
-- Tracking uses existing `det/det.txt` detections (no drawing tool in this MVP).
-- Tracking writes directly into `gt/gt.txt` and autosaves state files.
-
-## Core Workflow (Single-Person Passes)
-
-1. Start with no active track.
-2. Click a detection to seed a new track pass.
-3. Advance frame-by-frame selecting that same person.
-4. Assigned detections are omitted from candidate pools by default.
-5. End track, then start next unmatched person pass.
+- Uses existing `det/det.txt` detections as detector input.
+- Writes generated tracks to `gt/gt.txt` (plus session files) via autosave.
+- Click a track row or click a box on canvas to focus the active track.
+- Proposed tracks can be marked **Keep** to move them into a separate kept list with metadata.
+- Keep metadata fields: `team` (`home`/`away`), `jersey_number` (integer), `name` (string).
+- Use `Split (S)` at the current frame to split the active track into a new track from that frame forward.
+- Split lineage is tracked with `group` + `segment` so split siblings stay visually grouped in table order.
+- Use `Merge` (or `M`) to merge a **proposed** track into a **kept** track; target choices show track ID, jersey, name, and team.
+- Merge keeps the kept track ID as target, preserves non-contiguous segments, and skips overlapping target frames.
 
 ## Hotkeys
 
-- `Space`: play/pause active-track playback
+- `Space`: play/pause playback
 - `A` / `Left`: previous frame
-- `Right`: advance one frame (autosaves current track step; uses tracker if active)
-- `W`: skip forward 5 frames
-- `Q`: end current track pass
-- `E`: create/select next track id
-- `R`: undo last assignment
-- `S`: save `gt/gt.txt`
-- `T`: track from current frame (same behavior as tracking-on + play)
-- `Y`: alias for track from current frame
+- `Right`: next frame
+- `S`: split active track at current frame
+- `M`: merge active track into another track
+- `T`: run **Track all**
 
