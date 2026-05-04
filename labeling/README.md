@@ -49,10 +49,11 @@ If these packages are missing, the tracker buttons are disabled and the app stay
 
 1. Create/select an active track (`E` or `Use` in track table).
 2. On the current frame, click the target player's detection box to seed/correct.
-3. Click **Track full pass** (or press `T`) to run ByteTrack forward from current frame.
-4. Scrub timeline; if it drifts or swaps, click the correct box at that frame.
-5. Click **Re-track from here** (or press `Y`) to re-run forward from that correction frame.
-6. Repeat correction/re-track loop until sequence end.
+3. Keep **Tracking enabled** ON (default), then press `Space` to seed ByteTrack from the current box and autoplay.
+4. Press `Space` to pause when occlusions/overlaps happen.
+5. Correct by clicking the right box on the paused frame.
+6. Use `Right` to advance one frame at a time with autosave, or `Space` to resume fast autoplay.
+7. Turn **Tracking enabled** OFF for review-only playback/navigation.
 
 Notes:
 - Tracking uses existing `det/det.txt` detections (no drawing tool in this MVP).
@@ -68,14 +69,14 @@ Notes:
 
 ## Hotkeys
 
-- `Space`: assign top candidate for current active pass, then advance one frame
 - `Space`: play/pause active-track playback
-- `A` / `D`: previous / next frame
+- `A` / `Left`: previous frame
+- `Right`: advance one frame (autosaves current track step; uses tracker if active)
 - `W`: skip forward 5 frames
 - `Q`: end current track pass
 - `E`: create/select next track id
 - `R`: undo last assignment
 - `S`: save `gt/gt.txt`
-- `T`: run initial ByteTrack full pass from frame 1 (one-time per track, requires seeded box)
-- `Y`: re-run ByteTrack from current frame after correction (requires active track + seeded box)
+- `T`: track from current frame (same behavior as tracking-on + play)
+- `Y`: alias for track from current frame
 
